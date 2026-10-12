@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Publish a version tag to GitHub, which is where `go get` resolves
+# this module.
+#
+#   scripts/tag v0.2.0
+#
+# sockeye is origin and holds the code; GitHub holds `main`, mirrored by
+# sockeye's merge, and the tags a consumer resolves against. sockeye
+# itself has no use for a tag, so one is never pushed there -- this
+# sends it straight to the module path, which is the address `go get`
+# already uses and so needs no second thing to configure.
+#
+# Uses your own github.com credentials, the ones `soc git setup`
+# deliberately leaves alone.
+set -euo pipefail
+
+version=${1:-}
+if [ -z "$version" ]; then
+  echo "usage: scripts/tag vX.Y.Z" >&2
+  exit 1
+fi
+
+# Go requires the v. A tag it cannot parse is not a version, it is a
+# tag that will be ignored by the proxy and reported as missing.
+if ! printf '%s' "$version" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+  echo "tag must look like v0.2.0, got $version" >&2
+  exit 1
+fi
+
+cd "$(git rev-parse --show-toplevel)"
+
+# The module path is the GitHub URL, so there is nothing to configure
+# and nothing to drift: whatever `go get` asks for is what this pushes.
+module=$(go list -m)
+case "$module" in
+github.com/*) ;;
+*)
+  echo "module $module is not on github.com; nothing to publish" >&2
+  exit 1
+  ;;
+esac
+url="https://$module.git"
+
+# A tag is a claim about a commit other people will fetch, so it is
+# worth being sure which commit. Uncommitted work means the tree in
+# front of you is not the tree being tagged.
+if [ -n "$(git status --porcelain)" ]; then
+  echo "working tree is dirty; commit or stash first" >&2
+  exit 1
+fi
+
+# The base branch is whatever origin points HEAD at, so this reads the
+# same answer sockeye has for the repo rather than assuming main.
+base=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD || echo "")
+base=${base#origin/}
+base=${base:-main}
+
+branch=$(git symbolic-ref --quiet --short HEAD || echo "")
+if [ "$branch" != "$base" ]; then
+  echo "on $branch, not $base; tag what sockeye merged" >&2
+  exit 1
+fi
+
+# Tag the merged tip, not a local one. A change merges on the sockeye server,
+# so a local main that has not caught up would tag a commit nobody
+# else has.
+git fetch --quiet origin "$base"
+if [ "$(git rev-parse HEAD)" != "$(git rev-parse "origin/$base")" ]; then
+  echo "$base is not level with origin/$base; pull first" >&2
+  exit 1
+fi
+
+if git rev-parse --quiet --verify "refs/tags/$version" >/dev/null; then
+  echo "$version already exists locally" >&2
+  exit 1
+fi
+if [ -n "$(git ls-remote --tags "$url" "refs/tags/$version")" ]; then
+  echo "$version is already published" >&2
+  exit 1
+fi
+
+# Annotated, so the tag carries who made it and when. The proxy is
+# indifferent; a reader looking at a two-year-old version is not.
+git tag -a "$version" -m "$version"
+
+# Only the tag. A wider refspec would push main from a laptop, and
+# main is sockeye's to write.
+if ! git push "$url" "refs/tags/$version"; then
+  # Leave nothing half-done: a local tag for a version nobody can
+  # fetch is the state that makes the next attempt confusing.
+  git tag -d "$version" >/dev/null
+  echo "push failed; removed the local $version" >&2
+  exit 1
+fi
+
+echo "published $module@$version"

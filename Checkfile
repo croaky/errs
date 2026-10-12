@@ -1,0 +1,43 @@
+# -trimpath and -buildvcs=false keep a test binary a function of its
+# source alone. Without them a runner's slot path and the commit stamp
+# are built in, so a result cached by one slot never counts for
+# another and every run starts cold.
+test: go test -trimpath -buildvcs=false -race -cover ./...
+
+# goimports rather than gofmt, as in every other repo here: one command
+# to remember, and it still holds if this module ever imports something
+# of its own. -l lists what it would rewrite, and a non-empty list is
+# the failure, since a CI job that rewrote source would have nowhere to
+# put it.
+# go run at a pinned version: the runner installs no goimports, and a
+# tool directive in go.mod would put x/tools in the module graph of
+# every module that requires this one. go run writes its download
+# lines to stderr, which out= does not read.
+lint: out=$(go run golang.org/x/tools/cmd/goimports@v0.45.0 -local "$(go list -m)" -l .); if [ -n "$out" ]; then echo "$out"; exit 1; fi; go vet ./...
+
+# gopls at hint severity is what an editor underlines and nobody
+# reading a diff sees. It exits 0 whether or not it found anything, so
+# its output is the verdict: awk prints what it read, then fails if it
+# read a line.
+hints: git ls-files -z '*.go' | xargs -0 gopls check -severity=hint | awk '1; END { exit (NR > 0) }'
+
+# deadcode -test roots at the test binaries, so an exported helper that
+# no test calls is reported. That is the one rule this repo cannot get
+# from a compiler: the assertions are dead until another module fetches
+# them, so the tests are the only thing that says the surface is real.
+# Like gopls it exits 0 either way, so awk reads the verdict.
+# The first go run builds deadcode and discards everything it prints,
+# so the "go: downloading" lines of a cold module cache do not count.
+deadcode: go run golang.org/x/tools/cmd/deadcode@v0.45.0 -h >/dev/null 2>&1; go run golang.org/x/tools/cmd/deadcode@v0.45.0 -test ./... 2>&1 | awk '1; END { exit (NR > 0) }'
+
+# scripts/tag pushes the tag every consumer resolves against, and it
+# runs only at a release. A quoting bug in it would be found by the
+# release it breaks, so shellcheck reads it on every push instead.
+shellcheck: git ls-files -z 'scripts/*' '*.sh' | xargs -0 shellcheck
+
+# The prose is most of this repo, so it gets a formatter too. dprint
+# wraps Markdown at 72, the same column the commits use, so a paragraph
+# does not change shape when it moves between them. check rather than
+# fmt, for the same reason goimports runs with -l: a CI job that
+# rewrote a file would have nowhere to put it.
+fmt: dprint check
