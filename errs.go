@@ -20,9 +20,9 @@ import (
 
 const (
 	sdkName         = "croaky.errs"
-	sdkVersion      = "0.1.0"
+	sdkVersion      = "0.2.0"
 	protocolVersion = "7"
-	userAgent       = "croaky-errs-go/0.1.0"
+	userAgent       = "croaky-errs-go/0.2.0"
 	maxMessageBytes = 8192
 	queueLimit      = 1000
 )
@@ -41,10 +41,14 @@ func zeroRetryDelays() {
 	retryDelays = make([]time.Duration, len(defaultRetryDelays))
 }
 
-// Options configures the Sentry client.
-// An empty DSN disables error reporting without errors.
+// Options configures the client.
+//
+// DSN is a Sentry DSN and SockeyeDSN is a sockeye DSN, the output of
+// soc error key. With both set, the client sends every event to both.
+// With neither set, error reporting is off and Init returns no error.
 type Options struct {
 	DSN          string
+	SockeyeDSN   string
 	Environment  string
 	Release      string
 	ServerName   string
@@ -82,6 +86,10 @@ func WithFingerprint(parts ...string) Option {
 	return func(e *event) { e.Fingerprint = parts }
 }
 
+// WithRequestID tags the event with the request that caused it.
+// sockeye links the event to the log lines of that request.
+func WithRequestID(id string) Option { return WithTag("request_id", id) }
+
 // WithLevel sets the event level.
 func WithLevel(level string) Option {
 	return func(e *event) { e.Level = level }
@@ -89,6 +97,8 @@ func WithLevel(level string) Option {
 
 type client struct {
 	dsn          dsn
+	hasSentry    bool
+	sockeye      *sockeyeBackend
 	environment  string
 	release      string
 	serverName   string
@@ -102,6 +112,10 @@ type client struct {
 	queue  chan *event
 	wg     sync.WaitGroup
 	closed atomic.Bool
+
+	// dropped counts the events the client discarded without
+	// delivering them. The next event sent to sockeye reports it.
+	dropped atomic.Int64
 }
 
 func (c *client) now() time.Time {
@@ -114,15 +128,26 @@ func (c *client) now() time.Time {
 var active atomic.Pointer[client]
 
 // Init initializes the global error reporting client.
-// An empty DSN disables reporting silently.
+// With no DSN and no SockeyeDSN, reporting is off and Init returns nil.
 func Init(opts Options) error {
-	if opts.DSN == "" {
+	if opts.DSN == "" && opts.SockeyeDSN == "" {
 		active.Store(nil)
 		return nil
 	}
-	d, err := parseDSN(opts.DSN)
-	if err != nil {
-		return err
+	var d dsn
+	if opts.DSN != "" {
+		var err error
+		if d, err = parseDSN(opts.DSN); err != nil {
+			return err
+		}
+	}
+	var sb *sockeyeBackend
+	if opts.SockeyeDSN != "" {
+		sd, err := parseSockeyeDSN(opts.SockeyeDSN)
+		if err != nil {
+			return err
+		}
+		sb = newSockeyeBackend(sd)
 	}
 	hc := opts.HTTPClient
 	if hc == nil {
@@ -146,6 +171,8 @@ func Init(opts Options) error {
 	}
 	c := &client{
 		dsn:          d,
+		hasSentry:    opts.DSN != "",
+		sockeye:      sb,
 		environment:  opts.Environment,
 		release:      opts.Release,
 		serverName:   serverName,
@@ -216,14 +243,32 @@ func (c *client) dispatch(e *event) {
 	case c.queue <- e:
 	default:
 		c.wg.Done()
+		c.dropped.Add(1)
 	}
 }
 
 func (c *client) worker() {
 	defer c.wg.Done()
-	for e := range c.queue {
-		c.send(e)
-		c.wg.Done()
+	var tick <-chan time.Time
+	if c.sockeye != nil {
+		t := time.NewTicker(countEvery)
+		defer t.Stop()
+		tick = t.C
+	}
+	for {
+		select {
+		case e, ok := <-c.queue:
+			if !ok {
+				if c.sockeye != nil {
+					c.sockeye.flushCounts(c, true)
+				}
+				return
+			}
+			c.send(e)
+			c.wg.Done()
+		case <-tick:
+			c.sockeye.flushCounts(c, false)
+		}
 	}
 }
 
@@ -231,7 +276,11 @@ func (c *client) flush(timeout time.Duration) {
 	if c.closed.Swap(true) {
 		return
 	}
-	if !c.syncDispatch {
+	if c.syncDispatch {
+		if c.sockeye != nil {
+			c.sockeye.flushCounts(c, true)
+		}
+	} else {
 		c.mu.Lock()
 		close(c.queue)
 		c.mu.Unlock()
@@ -256,7 +305,17 @@ func isTransient(code int) bool {
 	}
 }
 
+// send delivers one event to each configured backend.
 func (c *client) send(e *event) {
+	if c.hasSentry {
+		c.sendSentry(e)
+	}
+	if c.sockeye != nil {
+		c.sockeye.send(c, e)
+	}
+}
+
+func (c *client) sendSentry(e *event) {
 	now := c.now()
 	body, err := envelopeBody(e, now)
 	if err != nil {
@@ -266,20 +325,33 @@ func (c *client) send(e *event) {
 	url := c.dsn.envelopeEndpoint()
 	auth := c.dsn.authHeader(now.Unix(), userAgent)
 
+	c.deliver("sentry", func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/x-sentry-envelope")
+		req.Header.Set("User-Agent", userAgent)
+		req.Header.Set("X-Sentry-Auth", auth)
+		return req, nil
+	})
+}
+
+// deliver sends one request with the retry loop and reports whether
+// the server accepted it. build makes a fresh request for each try.
+// name starts each log line.
+func (c *client) deliver(name string, build func() (*http.Request, error)) bool {
 	delays := retryDelays
 	var (
 		lastStatus int
 		lastErr    error
 	)
 	for i, delay := range delays {
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
+		req, err := build()
 		if err != nil {
-			log.Printf("sentry: build request: %v", err)
-			return
+			log.Printf("%s: build request: %v", name, err)
+			return false
 		}
-		req.Header.Set("Content-Type", "application/x-sentry-envelope")
-		req.Header.Set("User-Agent", userAgent)
-		req.Header.Set("X-Sentry-Auth", auth)
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -324,18 +396,20 @@ func (c *client) send(e *event) {
 		}
 
 		if resp.StatusCode/100 != 2 {
-			log.Printf("sentry: send: HTTP %d (non-retriable)", resp.StatusCode)
+			log.Printf("%s: send: HTTP %d (non-retriable)", name, resp.StatusCode)
+			return false
 		}
-		return
+		return true
 	}
 
 	if lastStatus != 0 {
-		log.Printf("sentry: send: HTTP %d (exhausted)", lastStatus)
+		log.Printf("%s: send: HTTP %d (exhausted)", name, lastStatus)
 	} else if lastErr != nil {
-		log.Printf("sentry: send (exhausted): %v", lastErr)
+		log.Printf("%s: send (exhausted): %v", name, lastErr)
 	} else {
-		log.Printf("sentry: send: exhausted retries")
+		log.Printf("%s: send: exhausted retries", name)
 	}
+	return false
 }
 
 func parseRetryAfter(h string) time.Duration {

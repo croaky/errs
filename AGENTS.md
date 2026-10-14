@@ -1,7 +1,8 @@
 # Agents guide
 
-errs is a Sentry error client for Go applications. See `README.md` for
-usage and `doc.go` for design details.
+errs is an error client for Go applications. It sends to Sentry, to
+sockeye, or to both. See `README.md` for usage and `doc.go` for design
+details.
 
 ## Writing
 
@@ -46,6 +47,8 @@ assertions from `github.com/croaky/is`.
 - `event.go` — event types, JSON envelope serialization, error
   unwrapping, and stack frame resolution.
 - `dsn.go` — Sentry DSN parser and authentication header generation.
+- `sockeye.go` — sockeye DSN parser, JSON body, sampling by error, and
+  circuit breaker.
 - `stack.go` — `Wrap`, `Errorf`, `PanicError`, stack program counter
   capture, and error chain walking.
 - `doc.go` — package documentation.
