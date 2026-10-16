@@ -29,6 +29,15 @@ if err != nil {
 defer errs.Flush(2 * time.Second)
 ```
 
+Wrap the default slog handler to report every `slog.Error` call. The
+call still writes its log line:
+
+```go
+slog.SetDefault(slog.New(errs.SlogHandler(slog.Default().Handler())))
+```
+
+An empty `Release` reads the commit from the Go build info.
+
 Wrap errors to record caller stack traces:
 
 ```go

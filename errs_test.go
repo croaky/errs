@@ -497,3 +497,15 @@ func TestInAppPrefixOption(t *testing.T) {
 	last := frames[len(frames)-1].(map[string]any)
 	is.Eq(last["in_app"], true)
 }
+
+func TestInitReadsReleaseFromBuildInfo(t *testing.T) {
+	is := is.New(t)
+	resetActive(t)
+	is.NoErr(Init(Options{DSN: testDSN, SyncDispatch: true}))
+	defer Flush(time.Second)
+	is.Eq(active.Load().release, buildRevision())
+
+	resetActive(t)
+	is.NoErr(Init(Options{DSN: testDSN, Release: "v9", SyncDispatch: true}))
+	is.Eq(active.Load().release, "v9")
+}

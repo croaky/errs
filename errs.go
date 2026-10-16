@@ -163,6 +163,10 @@ func Init(opts Options) error {
 	if wd, err := os.Getwd(); err == nil {
 		root = wd
 	}
+	release := opts.Release
+	if release == "" {
+		release = buildRevision()
+	}
 	inAppPrefix := strings.TrimSpace(opts.InAppPrefix)
 	if inAppPrefix == "" {
 		if info, ok := debug.ReadBuildInfo(); ok && info.Main.Path != "" {
@@ -174,7 +178,7 @@ func Init(opts Options) error {
 		hasSentry:    opts.DSN != "",
 		sockeye:      sb,
 		environment:  opts.Environment,
-		release:      opts.Release,
+		release:      release,
 		serverName:   serverName,
 		root:         root,
 		inAppPrefix:  inAppPrefix,
@@ -429,4 +433,17 @@ func newEventID() string {
 		return "00000000000000000000000000000000"
 	}
 	return hex.EncodeToString(b[:])
+}
+
+// buildRevision returns the VCS commit that the Go build info records,
+// or an empty string when the build carries none.
+func buildRevision() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range info.Settings {
+			if s.Key == "vcs.revision" {
+				return s.Value
+			}
+		}
+	}
+	return ""
 }

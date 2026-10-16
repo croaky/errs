@@ -51,6 +51,7 @@ assertions from `github.com/croaky/is`.
   circuit breaker.
 - `stack.go` — `Wrap`, `Errorf`, `PanicError`, stack program counter
   capture, and error chain walking.
+- `slog.go` — `SlogHandler`, which reports error-level slog records.
 - `doc.go` — package documentation.
 
 ## Checks
