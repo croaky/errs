@@ -94,7 +94,6 @@ func WithLevel(level string) Option {
 
 type client struct {
 	dsn          dsn
-	sockeye      *sockeyeBackend
 	environment  string
 	release      string
 	serverName   string
@@ -112,6 +111,11 @@ type client struct {
 	// dropped counts the events the client discarded without
 	// delivering them. The next event sent to sockeye reports it.
 	dropped atomic.Int64
+
+	breakerMu sync.Mutex
+	buckets   map[string]*bucket
+	failures  int
+	openUntil time.Time
 }
 
 func (c *client) now() time.Time {
@@ -138,7 +142,6 @@ func Init(opts Options) error {
 	if err != nil {
 		return err
 	}
-	sb := newSockeyeBackend(d)
 	hc := opts.HTTPClient
 	if hc == nil {
 		hc = &http.Client{Timeout: 5 * time.Second}
@@ -161,7 +164,6 @@ func Init(opts Options) error {
 	}
 	c := &client{
 		dsn:          d,
-		sockeye:      sb,
 		environment:  opts.Environment,
 		release:      opts.Release,
 		serverName:   serverName,
@@ -171,6 +173,7 @@ func Init(opts Options) error {
 		httpClient:   hc,
 		syncDispatch: opts.SyncDispatch,
 		queue:        make(chan *event, queueLimit),
+		buckets:      map[string]*bucket{},
 	}
 	if !c.syncDispatch {
 		c.wg.Add(1)
@@ -212,7 +215,7 @@ func CaptureMessage(msg string, opts ...Option) string {
 		return ""
 	}
 	e := c.newEvent("info", opts)
-	e.Message = &messagePayload{Formatted: truncate(msg)}
+	e.Message = truncate(msg)
 	c.dispatch(e)
 	return e.EventID
 }
@@ -244,13 +247,13 @@ func (c *client) worker() {
 		select {
 		case e, ok := <-c.queue:
 			if !ok {
-				c.sockeye.flushCounts(c, true)
+				c.flushCounts(true)
 				return
 			}
 			c.send(e)
 			c.wg.Done()
 		case <-t.C:
-			c.sockeye.flushCounts(c, false)
+			c.flushCounts(false)
 		}
 	}
 }
@@ -260,7 +263,7 @@ func (c *client) flush(timeout time.Duration) {
 		return
 	}
 	if c.syncDispatch {
-		c.sockeye.flushCounts(c, true)
+		c.flushCounts(true)
 	} else {
 		c.mu.Lock()
 		close(c.queue)
@@ -284,11 +287,6 @@ func isTransient(code int) bool {
 	default:
 		return false
 	}
-}
-
-// send delivers one event to the configured backend.
-func (c *client) send(e *event) {
-	c.sockeye.send(c, e)
 }
 
 // deliver sends one request with the retry loop and reports whether
@@ -319,7 +317,7 @@ func (c *client) deliver(name string, build func() (*http.Request, error)) bool 
 			continue
 		}
 
-		_, readErr := io.Copy(io.Discard, resp.Body)
+		_, readErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		resp.Body.Close()
 		lastStatus = resp.StatusCode
 

@@ -78,12 +78,12 @@ func (c *testClock) Advance(d time.Duration) { c.ns.Add(int64(d)) }
 
 func TestParseSockeyeDSN(t *testing.T) {
 	is := is.New(t)
-	d, err := parseSockeyeDSN(testSockeyeDSN)
+	d, err := parseDSN(testSockeyeDSN)
 	is.NoErr(err)
 	is.Eq(d.endpoint, "https://sockeye.example/errors/app/web")
 	is.Eq(d.key, "sek_test")
 
-	d, err = parseSockeyeDSN("http://k@localhost:8080/errors/a/b/")
+	d, err = parseDSN("http://k@localhost:8080/errors/a/b/")
 	is.NoErr(err)
 	is.Eq(d.endpoint, "http://localhost:8080/errors/a/b")
 }
@@ -97,7 +97,7 @@ func TestParseSockeyeDSNRejectsBadInput(t *testing.T) {
 		"https://k@sockeye.example/api/app/web",
 		"https://k@sockeye.example/errors/app/web/more",
 	} {
-		_, err := parseSockeyeDSN(s)
+		_, err := parseDSN(s)
 		if err == nil || !strings.Contains(err.Error(), "parse dsn") {
 			t.Fatalf("%q: want a parse error, got %v", s, err)
 		}
@@ -267,11 +267,11 @@ func TestFlushCountsSendsOnlyDueCounts(t *testing.T) {
 	}
 	// Events 11 sent a count of 1; events 12 and 13 are held.
 	before := len(srv.requests())
-	c.sockeye.flushCounts(c, false)
+	c.flushCounts(false)
 	is.Eq(len(srv.requests()), before)
 
 	clock.Advance(countEvery)
-	c.sockeye.flushCounts(c, false)
+	c.flushCounts(false)
 	reqs := srv.requests()
 	is.Eq(len(reqs), before+1)
 	is.Eq(reqs[len(reqs)-1].ev["count"], float64(2))
@@ -346,8 +346,8 @@ func TestFingerprintKey(t *testing.T) {
 	own := &event{Fingerprint: []string{"slow", "GET", "/x"}}
 	is.Eq(fingerprintKey(own), "own:slow\x00GET\x00/x")
 
-	a := &event{Message: &messagePayload{Formatted: "job 17 failed"}}
-	b := &event{Message: &messagePayload{Formatted: "job 18 failed"}}
+	a := &event{Message: "job 17 failed"}
+	b := &event{Message: "job 18 failed"}
 	is.Eq(fingerprintKey(a), fingerprintKey(b))
 
 	framed := func(fn string) *event {

@@ -24,17 +24,14 @@ type event struct {
 	Tags        map[string]string `json:"tags,omitempty"`
 	Extra       map[string]any    `json:"extra,omitempty"`
 	Fingerprint []string          `json:"fingerprint,omitempty"`
-	Message     *messagePayload   `json:"message,omitempty"`
+	Message     string            `json:"message,omitempty"`
+	Count       int               `json:"count,omitempty"`
 	Exception   *exceptionPayload `json:"exception,omitempty"`
 }
 
 type sdkInfo struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
-}
-
-type messagePayload struct {
-	Formatted string `json:"formatted"`
 }
 
 type exceptionPayload struct {
