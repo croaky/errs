@@ -297,7 +297,7 @@ func TestSockeyeBreakerOpensAndReportsDropped(t *testing.T) {
 	is.Eq(len(srv.requests()), tries)
 
 	srv.status.Store(202)
-	clock.Advance(breakerPause)
+	clock.Advance(breakerPauses[0])
 	CaptureMessage("back")
 
 	reqs := srv.requests()
@@ -325,12 +325,40 @@ func TestSockeyeBreakerReopensAfterOneFailedTry(t *testing.T) {
 	for range breakerFailures {
 		CaptureMessage("down")
 	}
-	clock.Advance(breakerPause)
+	clock.Advance(breakerPauses[0])
 	before := len(srv.requests())
 	CaptureMessage("probe")
 	is.Eq(len(srv.requests()), before+len(retryDelays))
 	CaptureMessage("next")
 	is.Eq(len(srv.requests()), before+len(retryDelays))
+}
+
+func TestSockeyeBreakerPausesBackOff(t *testing.T) {
+	is := is.New(t)
+	resetActive(t)
+	srv := newSockeyeServer(t)
+	defer srv.Close()
+	srv.status.Store(500)
+	clock := newTestClock()
+	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), SyncDispatch: true, Clock: clock.Now}))
+	defer Flush(time.Second)
+
+	for range breakerFailures {
+		CaptureMessage("down")
+	}
+
+	for i, pause := range breakerPauses {
+		// Just before the pause ends, breaker remains open.
+		clock.Advance(pause - time.Second)
+		before := len(srv.requests())
+		CaptureMessage("blocked")
+		is.Eq(len(srv.requests()), before)
+
+		// Advance past the pause to allow one probe.
+		clock.Advance(time.Second)
+		CaptureMessage(string(rune('a' + i)))
+		is.Eq(len(srv.requests()), before+len(retryDelays))
+	}
 }
 
 func TestFullQueueCountsDropped(t *testing.T) {

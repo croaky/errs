@@ -339,7 +339,7 @@ func (c *client) deliver(name string, build func() (*http.Request, error)) bool 
 			}
 			d := delay
 			if ra := parseRetryAfter(resp.Header.Get("Retry-After")); ra > 0 {
-				d = ra
+				d = max(delay, ra)
 			}
 			if d > 0 {
 				time.Sleep(d)

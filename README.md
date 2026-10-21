@@ -95,9 +95,9 @@ The sockeye path protects both ends of the connection:
   that, the client sends one event every 10 seconds with a `count` of
   the events it held back, so the group total stays exact. `Flush`
   sends the held counts.
-- After 5 failed sends in a row, the client stops sending for 30
-  seconds. It then tries once. A success closes the breaker, and a
-  failure opens it again.
+- After 5 failed sends in a row, the client stops sending. It pauses
+  for 30 seconds, then 1 minute, 2 minutes, 5 minutes, and 10 minutes
+  on consecutive failures. A success closes the breaker.
 - The client counts events it discards: a full queue, an open
   breaker, and a send that fails after its retries. The next event
   that reaches sockeye carries the number as `extra.dropped`.

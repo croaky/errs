@@ -18,11 +18,30 @@ const (
 	// countEvery is the pause between the count events of one error
 	// after it passes fullPerWindow.
 	countEvery = 10 * time.Second
-	// breakerFailures failed sends in a row open the breaker. It
-	// stays open for breakerPause.
+	// breakerFailures failed sends in a row open the breaker.
 	breakerFailures = 5
-	breakerPause    = 30 * time.Second
 )
+
+// breakerPauses is the schedule of pauses when consecutive sends fail.
+// It steps through the table up to the final delay.
+var breakerPauses = []time.Duration{
+	30 * time.Second,
+	1 * time.Minute,
+	2 * time.Minute,
+	5 * time.Minute,
+	10 * time.Minute,
+}
+
+func breakerPause(failures int) time.Duration {
+	idx := failures - breakerFailures
+	if idx < 0 {
+		return 0
+	}
+	if idx >= len(breakerPauses) {
+		idx = len(breakerPauses) - 1
+	}
+	return breakerPauses[idx]
+}
 
 // bucket tracks one error: the events it sent whole in this window,
 // and the events it held back since its last count.
@@ -148,7 +167,8 @@ func (c *client) allow(now time.Time) bool {
 }
 
 // record counts a send result. A success closes the breaker. The
-// breakerFailures-th failure in a row opens it for breakerPause.
+// breakerFailures-th failure in a row opens it, and consecutive
+// failures step through the breakerPauses schedule.
 func (c *client) record(ok bool, now time.Time) {
 	c.breakerMu.Lock()
 	defer c.breakerMu.Unlock()
@@ -158,7 +178,7 @@ func (c *client) record(ok bool, now time.Time) {
 	}
 	c.failures++
 	if c.failures >= breakerFailures {
-		c.openUntil = now.Add(breakerPause)
+		c.openUntil = now.Add(breakerPause(c.failures))
 	}
 }
 
