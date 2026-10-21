@@ -10,7 +10,7 @@ sites, and `Wrap` and `Errorf` to attach caller stack traces.
 ## Installation
 
 ```sh
-go get github.com/croaky/errs@v0.3.0
+go get github.com/croaky/errs@v0.4.0
 ```
 
 ## Usage

@@ -18,8 +18,8 @@ import (
 
 const (
 	sdkName         = "croaky.errs"
-	sdkVersion      = "0.3.0"
-	userAgent       = "croaky-errs-go/0.3.0"
+	sdkVersion      = "0.4.0"
+	userAgent       = "croaky-errs-go/0.4.0"
 	maxMessageBytes = 8192
 	queueLimit      = 1000
 )
