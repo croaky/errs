@@ -11,18 +11,18 @@ import (
 	"github.com/croaky/is"
 )
 
-func slogTestClient(t *testing.T) *captureServer {
+func slogTestClient(t *testing.T) *sockeyeServer {
 	t.Helper()
 	resetActive(t)
-	cs := newCaptureServer(t, 200)
-	t.Cleanup(cs.Close)
+	srv := newSockeyeServer(t)
+	t.Cleanup(srv.Close)
 	is.New(t).NoErr(Init(Options{
 		DSN:          testDSN,
-		HTTPClient:   rewriteTransport(cs.URL),
+		HTTPClient:   rewriteTransport(srv.URL),
 		SyncDispatch: true,
 	}))
 	t.Cleanup(func() { Flush(time.Second) })
-	return cs
+	return srv
 }
 
 func TestSlogHandlerSendsErrorRecordAsException(t *testing.T) {
@@ -52,20 +52,18 @@ func TestSlogHandlerSendsRecordWithoutErrorAsMessage(t *testing.T) {
 	log.Error("queue full", "depth", 9)
 
 	ev := cs.firstEvent(t)
-	is.Eq(ev["message"].(map[string]any)["formatted"], "queue full")
+	is.Eq(ev["message"], "queue full")
 }
 
 func TestSlogHandlerIgnoresLowerLevels(t *testing.T) {
 	is := is.New(t)
-	cs := slogTestClient(t)
+	srv := slogTestClient(t)
 	log := slog.New(SlogHandler(slog.NewTextHandler(&bytes.Buffer{}, nil)))
 
 	log.Warn("slow feed")
 	log.With("job", "ingest").Info("done")
 
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-	is.Eq(len(cs.events), 0)
+	is.Eq(len(srv.requests()), 0)
 }
 
 func TestSlogHandlerKeepsAttrsAndGroups(t *testing.T) {

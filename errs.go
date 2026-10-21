@@ -1,8 +1,6 @@
 package errs
 
 import (
-	"bytes"
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -20,9 +18,8 @@ import (
 
 const (
 	sdkName         = "croaky.errs"
-	sdkVersion      = "0.2.0"
-	protocolVersion = "7"
-	userAgent       = "croaky-errs-go/0.2.0"
+	sdkVersion      = "0.3.0"
+	userAgent       = "croaky-errs-go/0.3.0"
 	maxMessageBytes = 8192
 	queueLimit      = 1000
 )
@@ -43,8 +40,8 @@ func zeroRetryDelays() {
 
 // Options configures the client.
 //
-// DSN is a Sentry DSN and SockeyeDSN is a sockeye DSN, the output of
-// soc error key. With both set, the client sends every event to both.
+// DSN is a sockeye DSN, the output of `soc error dsn create`.
+// SockeyeDSN is an alias for DSN kept for backwards compatibility.
 // With neither set, error reporting is off and Init returns no error.
 type Options struct {
 	DSN          string
@@ -97,7 +94,6 @@ func WithLevel(level string) Option {
 
 type client struct {
 	dsn          dsn
-	hasSentry    bool
 	sockeye      *sockeyeBackend
 	environment  string
 	release      string
@@ -130,25 +126,19 @@ var active atomic.Pointer[client]
 // Init initializes the global error reporting client.
 // With no DSN and no SockeyeDSN, reporting is off and Init returns nil.
 func Init(opts Options) error {
-	if opts.DSN == "" && opts.SockeyeDSN == "" {
+	rawDSN := opts.DSN
+	if rawDSN == "" {
+		rawDSN = opts.SockeyeDSN
+	}
+	if rawDSN == "" {
 		active.Store(nil)
 		return nil
 	}
-	var d dsn
-	if opts.DSN != "" {
-		var err error
-		if d, err = parseDSN(opts.DSN); err != nil {
-			return err
-		}
+	d, err := parseDSN(rawDSN)
+	if err != nil {
+		return err
 	}
-	var sb *sockeyeBackend
-	if opts.SockeyeDSN != "" {
-		sd, err := parseSockeyeDSN(opts.SockeyeDSN)
-		if err != nil {
-			return err
-		}
-		sb = newSockeyeBackend(sd)
-	}
+	sb := newSockeyeBackend(d)
 	hc := opts.HTTPClient
 	if hc == nil {
 		hc = &http.Client{Timeout: 5 * time.Second}
@@ -163,10 +153,6 @@ func Init(opts Options) error {
 	if wd, err := os.Getwd(); err == nil {
 		root = wd
 	}
-	release := opts.Release
-	if release == "" {
-		release = buildRevision()
-	}
 	inAppPrefix := strings.TrimSpace(opts.InAppPrefix)
 	if inAppPrefix == "" {
 		if info, ok := debug.ReadBuildInfo(); ok && info.Main.Path != "" {
@@ -175,10 +161,9 @@ func Init(opts Options) error {
 	}
 	c := &client{
 		dsn:          d,
-		hasSentry:    opts.DSN != "",
 		sockeye:      sb,
 		environment:  opts.Environment,
-		release:      release,
+		release:      opts.Release,
 		serverName:   serverName,
 		root:         root,
 		inAppPrefix:  inAppPrefix,
@@ -253,24 +238,18 @@ func (c *client) dispatch(e *event) {
 
 func (c *client) worker() {
 	defer c.wg.Done()
-	var tick <-chan time.Time
-	if c.sockeye != nil {
-		t := time.NewTicker(countEvery)
-		defer t.Stop()
-		tick = t.C
-	}
+	t := time.NewTicker(countEvery)
+	defer t.Stop()
 	for {
 		select {
 		case e, ok := <-c.queue:
 			if !ok {
-				if c.sockeye != nil {
-					c.sockeye.flushCounts(c, true)
-				}
+				c.sockeye.flushCounts(c, true)
 				return
 			}
 			c.send(e)
 			c.wg.Done()
-		case <-tick:
+		case <-t.C:
 			c.sockeye.flushCounts(c, false)
 		}
 	}
@@ -281,9 +260,7 @@ func (c *client) flush(timeout time.Duration) {
 		return
 	}
 	if c.syncDispatch {
-		if c.sockeye != nil {
-			c.sockeye.flushCounts(c, true)
-		}
+		c.sockeye.flushCounts(c, true)
 	} else {
 		c.mu.Lock()
 		close(c.queue)
@@ -309,36 +286,9 @@ func isTransient(code int) bool {
 	}
 }
 
-// send delivers one event to each configured backend.
+// send delivers one event to the configured backend.
 func (c *client) send(e *event) {
-	if c.hasSentry {
-		c.sendSentry(e)
-	}
-	if c.sockeye != nil {
-		c.sockeye.send(c, e)
-	}
-}
-
-func (c *client) sendSentry(e *event) {
-	now := c.now()
-	body, err := envelopeBody(e, now)
-	if err != nil {
-		log.Printf("sentry: encode envelope: %v", err)
-		return
-	}
-	url := c.dsn.envelopeEndpoint()
-	auth := c.dsn.authHeader(now.Unix(), userAgent)
-
-	c.deliver("sentry", func() (*http.Request, error) {
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Content-Type", "application/x-sentry-envelope")
-		req.Header.Set("User-Agent", userAgent)
-		req.Header.Set("X-Sentry-Auth", auth)
-		return req, nil
-	})
+	c.sockeye.send(c, e)
 }
 
 // deliver sends one request with the retry loop and reports whether

@@ -56,6 +56,15 @@ func (s *sockeyeServer) requests() []sockeyeRequest {
 	return append([]sockeyeRequest(nil), s.reqs...)
 }
 
+func (s *sockeyeServer) firstEvent(t *testing.T) map[string]any {
+	t.Helper()
+	reqs := s.requests()
+	if len(reqs) == 0 {
+		t.Fatal("no requests received")
+	}
+	return reqs[0].ev
+}
+
 // testClock is a clock a test moves by hand.
 type testClock struct{ ns atomic.Int64 }
 
@@ -89,7 +98,7 @@ func TestParseSockeyeDSNRejectsBadInput(t *testing.T) {
 		"https://k@sockeye.example/errors/app/web/more",
 	} {
 		_, err := parseSockeyeDSN(s)
-		if err == nil || !strings.Contains(err.Error(), "parse sockeye dsn") {
+		if err == nil || !strings.Contains(err.Error(), "parse dsn") {
 			t.Fatalf("%q: want a parse error, got %v", s, err)
 		}
 	}
@@ -156,32 +165,23 @@ func TestSockeyeMessageIsAString(t *testing.T) {
 	is.Eq(reqs[0].ev["level"], "info")
 }
 
-func TestBothDSNsSendToBothBackends(t *testing.T) {
+func TestSockeyeDSNAlias(t *testing.T) {
 	is := is.New(t)
 	resetActive(t)
 	srv := newSockeyeServer(t)
 	defer srv.Close()
 	is.NoErr(Init(Options{
-		DSN:          testDSN,
 		SockeyeDSN:   testSockeyeDSN,
 		HTTPClient:   rewriteTransport(srv.URL),
 		SyncDispatch: true,
 	}))
 	defer Flush(time.Second)
 
-	CaptureMessage("both")
+	CaptureMessage("via alias")
 
-	var sentry, sockeye int
-	for _, r := range srv.requests() {
-		switch {
-		case strings.HasPrefix(r.path, "/api/456/envelope"):
-			sentry++
-		case r.path == "/errors/app/web":
-			sockeye++
-		}
-	}
-	is.Eq(sentry, 1)
-	is.Eq(sockeye, 1)
+	reqs := srv.requests()
+	is.Eq(len(reqs), 1)
+	is.Eq(reqs[0].ev["message"], "via alias")
 }
 
 func TestSockeyeSamplingKeepsTheTotalExact(t *testing.T) {

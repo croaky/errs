@@ -1,10 +1,7 @@
 package errs
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"reflect"
 	"runtime"
 	"strings"
@@ -14,7 +11,7 @@ import (
 
 var stackErrType = reflect.TypeFor[*stackErr]()
 
-// event represents the JSON payload in a Sentry envelope item.
+// event represents an error or message event payload.
 type event struct {
 	EventID     string            `json:"event_id"`
 	Timestamp   string            `json:"timestamp"`
@@ -94,30 +91,6 @@ func truncate(s string) string {
 }
 
 func isRuneStart(b byte) bool { return b&0xC0 != 0x80 }
-
-// envelopeBody serializes one event into three newline-separated JSON lines:
-//
-//	{envelope header}\n{item header}\n{event}
-func envelopeBody(e *event, now time.Time) ([]byte, error) {
-	envelope := map[string]any{
-		"event_id": e.EventID,
-		"sent_at":  now.UTC().Format(time.RFC3339),
-	}
-	item := map[string]any{
-		"type":         "event",
-		"content_type": "application/json",
-	}
-
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	for _, v := range []any{envelope, item, e} {
-		if err := enc.Encode(v); err != nil {
-			return nil, fmt.Errorf("encode envelope: %w", err)
-		}
-	}
-	return bytes.TrimRight(buf.Bytes(), "\n"), nil
-}
 
 // exceptionFromError builds an exception payload for err.
 func exceptionFromError(err error, fallbackPCs []uintptr, root, inAppPrefix string) *exceptionPayload {

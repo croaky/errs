@@ -1,7 +1,7 @@
 # errs
 
 errs is an error reporting client for Go applications. It sends events
-to Sentry, to sockeye, or to both.
+to sockeye.
 
 The package provides a small API: `Init` and `Flush` at application
 startup and shutdown, `CaptureException` and `CaptureMessage` at call
@@ -10,7 +10,7 @@ sites, and `Wrap` and `Errorf` to attach caller stack traces.
 ## Installation
 
 ```sh
-go get github.com/croaky/errs@v0.1.0
+go get github.com/croaky/errs@v0.3.0
 ```
 
 ## Usage
@@ -19,7 +19,7 @@ Configure the client during application startup:
 
 ```go
 err := errs.Init(errs.Options{
-	DSN:         os.Getenv("SENTRY_DSN"),
+	DSN:         os.Getenv("SOCKEYE_DSN"),
 	Environment: "production",
 	Release:     "v1.0.0",
 })
@@ -64,26 +64,23 @@ errs.CaptureMessage("task completed", errs.WithLevel("info"))
 
 [sockeye](https://sockeye.sh) groups errors on its `/errors` page and
 links each group to the deploy that introduced it. Issue a key for a
-registered service, and set `SockeyeDSN`:
+registered service, and set `DSN` (or `SockeyeDSN`):
 
 ```sh
-soc error key <repo> <service>
+soc error dsn create <repo> <service>
 # https://<key>@<host>/errors/<repo>/<service>
 ```
 
 ```go
 err := errs.Init(errs.Options{
-	SockeyeDSN:  os.Getenv("SOCKEYE_DSN"),
+	DSN:         os.Getenv("SOCKEYE_DSN"),
 	Environment: "production",
 	Release:     os.Getenv("GIT_SHA"),
 })
 ```
 
 `Release` is the commit sha that runs. sockeye matches it to a deploy.
-
-Set `DSN` as well, and the client sends every event to both. Set only
-`SockeyeDSN`, and the client does not use Sentry. An invalid DSN makes
-`Init` return an error that names the expected form.
+An invalid DSN makes `Init` return an error that names the expected form.
 
 Tag an event with its request, so sockeye links it to the log lines of
 that request:
@@ -105,12 +102,9 @@ The sockeye path protects both ends of the connection:
   breaker, and a send that fails after its retries. The next event
   that reaches sockeye carries the number as `extra.dropped`.
 
-The Sentry path has no sampling and no breaker.
-
 ## Architecture
 
-- The client formats events into Sentry envelopes and sends them over
-  HTTP. For sockeye, it posts each event as JSON with a Bearer key.
+- The client posts each event as JSON to sockeye with a Bearer key.
 - An asynchronous worker queues events up to 1,000 items and drops
   events when the queue is full.
 - The sender retries transport errors and transient HTTP status codes

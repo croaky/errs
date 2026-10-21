@@ -7,84 +7,34 @@ import (
 	"strings"
 )
 
-// dsn is the parsed form of a Sentry DSN:
+// dsn is the parsed form of a sockeye DSN, the output of
+// `soc error dsn create <repo> <service>`:
 //
-//	{scheme}://{publicKey}@{host}[:{port}]{path}/{projectID}
-//
-// path is the joined leading path segments. Project id is the last
-// segment.
+//	https://<key>@<host>/errors/<repo>/<service>
 type dsn struct {
-	scheme    string
-	host      string
-	port      string // Port number; empty means the default port for the scheme.
-	publicKey string
-	projectID string
-	path      string // Path with leading "/", or empty.
+	endpoint string
+	key      string
 }
 
-// parseDSN parses a Sentry DSN string into a dsn struct.
-// It returns an error when required components are missing.
+// parseDSN parses a sockeye DSN. The error names the expected form.
 func parseDSN(s string) (dsn, error) {
+	const want = "want https://<key>@<host>/errors/<repo>/<service>, the output of soc error dsn create"
 	u, err := url.Parse(strings.TrimSpace(s))
 	if err != nil {
 		return dsn{}, fmt.Errorf("parse dsn: %w", err)
 	}
-	if u.Scheme == "" || u.Host == "" || u.User == nil {
-		return dsn{}, errors.New("parse dsn: scheme, host, and public key are required")
+	if (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return dsn{}, errors.New("parse dsn: scheme and host are required; " + want)
 	}
-	publicKey := u.User.Username()
-	if publicKey == "" {
-		return dsn{}, errors.New("parse dsn: missing public key")
+	if u.User == nil || u.User.Username() == "" {
+		return dsn{}, errors.New("parse dsn: the key is missing; " + want)
 	}
-
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if len(parts) == 0 || parts[len(parts)-1] == "" {
-		return dsn{}, errors.New("parse dsn: missing project id")
+	if len(parts) != 3 || parts[0] != "errors" || parts[1] == "" || parts[2] == "" {
+		return dsn{}, errors.New("parse dsn: the path must be /errors/<repo>/<service>; " + want)
 	}
-	projectID := parts[len(parts)-1]
-	leading := parts[:len(parts)-1]
-
-	path := ""
-	if len(leading) > 0 {
-		path = "/" + strings.Join(leading, "/")
-	}
-
 	return dsn{
-		scheme:    u.Scheme,
-		host:      u.Hostname(),
-		port:      u.Port(),
-		publicKey: publicKey,
-		projectID: projectID,
-		path:      path,
+		endpoint: fmt.Sprintf("%s://%s/errors/%s/%s", u.Scheme, u.Host, parts[1], parts[2]),
+		key:      u.User.Username(),
 	}, nil
-}
-
-// envelopeEndpoint returns the URL for envelope POST requests.
-// It omits the port when the port matches the scheme default.
-func (d dsn) envelopeEndpoint() string {
-	port := ""
-	if d.port != "" && !isDefaultPort(d.scheme, d.port) {
-		port = ":" + d.port
-	}
-	return fmt.Sprintf("%s://%s%s%s/api/%s/envelope/",
-		d.scheme, d.host, port, d.path, d.projectID)
-}
-
-// authHeader returns the X-Sentry-Auth header value.
-// now is the Unix timestamp in seconds; client identifies this library.
-func (d dsn) authHeader(now int64, client string) string {
-	return fmt.Sprintf(
-		"Sentry sentry_version=%s, sentry_timestamp=%d, sentry_key=%s, sentry_client=%s",
-		protocolVersion, now, d.publicKey, client,
-	)
-}
-
-func isDefaultPort(scheme, port string) bool {
-	switch scheme {
-	case "http":
-		return port == "80"
-	case "https":
-		return port == "443"
-	}
-	return false
 }

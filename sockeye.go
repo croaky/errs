@@ -3,11 +3,8 @@ package errs
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"maps"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -28,37 +25,7 @@ const (
 	breakerPause    = 30 * time.Second
 )
 
-// sockeyeDSN is the parsed form of a sockeye DSN, the output of
-// `soc error key <repo> <service>`:
-//
-//	https://<key>@<host>/errors/<repo>/<service>
-type sockeyeDSN struct {
-	endpoint string
-	key      string
-}
-
-// parseSockeyeDSN parses a sockeye DSN. The error names the fix.
-func parseSockeyeDSN(s string) (sockeyeDSN, error) {
-	const want = "want https://<key>@<host>/errors/<repo>/<service>, the output of soc error key"
-	u, err := url.Parse(strings.TrimSpace(s))
-	if err != nil {
-		return sockeyeDSN{}, fmt.Errorf("parse sockeye dsn: %w", err)
-	}
-	if (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-		return sockeyeDSN{}, errors.New("parse sockeye dsn: scheme and host are required; " + want)
-	}
-	if u.User == nil || u.User.Username() == "" {
-		return sockeyeDSN{}, errors.New("parse sockeye dsn: the key is missing; " + want)
-	}
-	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if len(parts) != 3 || parts[0] != "errors" || parts[1] == "" || parts[2] == "" {
-		return sockeyeDSN{}, errors.New("parse sockeye dsn: the path must be /errors/<repo>/<service>; " + want)
-	}
-	return sockeyeDSN{
-		endpoint: fmt.Sprintf("%s://%s/errors/%s/%s", u.Scheme, u.Host, parts[1], parts[2]),
-		key:      u.User.Username(),
-	}, nil
-}
+var parseSockeyeDSN = parseDSN
 
 // sockeyeEvent is an event as sockeye reads it. sockeye takes the
 // message as a string and the number of events one event stands for as
@@ -72,7 +39,7 @@ type sockeyeEvent struct {
 // sockeyeBackend sends events to sockeye. It samples by error, and it
 // stops sending while sockeye is down.
 type sockeyeBackend struct {
-	dsn sockeyeDSN
+	dsn dsn
 
 	mu        sync.Mutex
 	buckets   map[string]*bucket
@@ -90,7 +57,7 @@ type bucket struct {
 	last        *event
 }
 
-func newSockeyeBackend(d sockeyeDSN) *sockeyeBackend {
+func newSockeyeBackend(d dsn) *sockeyeBackend {
 	return &sockeyeBackend{dsn: d, buckets: map[string]*bucket{}}
 }
 

@@ -1,7 +1,6 @@
 package errs
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,7 +8,6 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,90 +15,33 @@ import (
 	"github.com/croaky/is"
 )
 
-const testDSN = "https://abc123@o123.ingest.us.sentry.io/456"
+const testDSN = "https://sek_test@sockeye.example/errors/app/web"
 
 func TestParseDSNExtractsComponents(t *testing.T) {
 	is := is.New(t)
 	d, err := parseDSN(testDSN)
 	is.NoErr(err)
-	is.True(d.scheme == "https" && d.host == "o123.ingest.us.sentry.io" &&
-		d.publicKey == "abc123" && d.projectID == "456" && d.path == "")
-}
-
-func TestParseDSNEnvelopeEndpoint(t *testing.T) {
-	is := is.New(t)
-	d, err := parseDSN(testDSN)
-	is.NoErr(err)
-	got := d.envelopeEndpoint()
-	want := "https://o123.ingest.us.sentry.io/api/456/envelope/"
-	is.Eq(got, want)
-}
-
-func TestParseDSNAuthHeaderFormat(t *testing.T) {
-	is := is.New(t)
-	d, err := parseDSN(testDSN)
-	is.NoErr(err)
-	got := d.authHeader(1714766400, userAgent)
-	for _, want := range []string{
-		"Sentry sentry_version=7,",
-		"sentry_timestamp=1714766400",
-		"sentry_key=abc123",
-		"sentry_client=" + userAgent,
-	} {
-		is.True(strings.Contains(got, want))
-	}
+	is.Eq(d.endpoint, "https://sockeye.example/errors/app/web")
+	is.Eq(d.key, "sek_test")
 }
 
 func TestParseDSNRejectsBadInput(t *testing.T) {
-	is := is.New(t)
 	cases := []string{
 		"",
 		"not-a-url",
-		"https://o123.sentry.io/456", // no public key
-		"https://abc@o123.sentry.io", // no project id
+		"sockeye.example/errors/app/web",
+		"ftp://k@sockeye.example/errors/app/web",
+		"https://sockeye.example/errors/app/web",
+		"https://k@sockeye.example/errors/app",
+		"https://k@sockeye.example/api/app/web",
+		"https://k@sockeye.example/errors/app/web/more",
 	}
 	for _, c := range cases {
 		_, err := parseDSN(c)
-		is.HasErr(err)
-	}
-}
-
-type captureServer struct {
-	*httptest.Server
-	mu      sync.Mutex
-	headers []http.Header
-	events  []map[string]any
-}
-
-func newCaptureServer(t *testing.T, status int) *captureServer {
-	t.Helper()
-	is := is.New(t)
-	cs := &captureServer{}
-	cs.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		lines := strings.Split(strings.TrimRight(string(body), "\n"), "\n")
-		is.Eq(len(lines), 3)
-		var ev map[string]any
-		if len(lines) >= 3 {
-			err := json.Unmarshal([]byte(lines[2]), &ev)
-			is.NoErr(err)
+		if err == nil {
+			t.Fatalf("%q: want parse error", c)
 		}
-		cs.mu.Lock()
-		cs.headers = append(cs.headers, r.Header.Clone())
-		cs.events = append(cs.events, ev)
-		cs.mu.Unlock()
-		w.WriteHeader(status)
-	}))
-	return cs
-}
-
-func (cs *captureServer) firstEvent(t *testing.T) map[string]any {
-	t.Helper()
-	is := is.New(t)
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-	is.True(len(cs.events) > 0)
-	return cs.events[0]
+	}
 }
 
 func rewriteTransport(target string) *http.Client {
@@ -130,18 +71,18 @@ func resetActive(t *testing.T) {
 	active.Store(nil)
 }
 
-func TestCaptureExceptionPostsEnvelopeWithFrames(t *testing.T) {
+func TestCaptureExceptionSendsFrames(t *testing.T) {
 	is := is.New(t)
 	resetActive(t)
-	cs := newCaptureServer(t, 200)
-	defer cs.Close()
+	srv := newSockeyeServer(t)
+	defer srv.Close()
 
 	err := Init(Options{
 		DSN:          testDSN,
 		Environment:  "test",
 		Release:      "v1",
 		ServerName:   "test-host",
-		HTTPClient:   rewriteTransport(cs.URL),
+		HTTPClient:   rewriteTransport(srv.URL),
 		SyncDispatch: true,
 	})
 	is.NoErr(err)
@@ -150,7 +91,9 @@ func TestCaptureExceptionPostsEnvelopeWithFrames(t *testing.T) {
 	err = Wrap(errors.New("kaboom"), "fetch positions")
 	CaptureException(err, WithTag("job", "worker.RefreshItem"))
 
-	ev := cs.firstEvent(t)
+	reqs := srv.requests()
+	is.Eq(len(reqs), 1)
+	ev := reqs[0].ev
 	is.Eq(ev["environment"], "test")
 	is.Eq(ev["release"], "v1")
 	is.Eq(ev["server_name"], "test-host")
@@ -164,18 +107,18 @@ func TestCaptureExceptionPostsEnvelopeWithFrames(t *testing.T) {
 	frames := stack["frames"].([]any)
 	is.True(len(frames) > 0)
 	last := frames[len(frames)-1].(map[string]any)
-	is.True(strings.Contains(last["function"].(string), "TestCaptureExceptionPostsEnvelopeWithFrames"))
+	is.True(strings.Contains(last["function"].(string), "TestCaptureExceptionSendsFrames"))
 }
 
 func TestCaptureExceptionFallsBackToCallerStack(t *testing.T) {
 	is := is.New(t)
 	resetActive(t)
-	cs := newCaptureServer(t, 200)
-	defer cs.Close()
+	srv := newSockeyeServer(t)
+	defer srv.Close()
 
 	err := Init(Options{
 		DSN:          testDSN,
-		HTTPClient:   rewriteTransport(cs.URL),
+		HTTPClient:   rewriteTransport(srv.URL),
 		SyncDispatch: true,
 	})
 	is.NoErr(err)
@@ -183,8 +126,9 @@ func TestCaptureExceptionFallsBackToCallerStack(t *testing.T) {
 
 	CaptureException(fmt.Errorf("plain"))
 
-	ev := cs.firstEvent(t)
-	exc := ev["exception"].(map[string]any)
+	reqs := srv.requests()
+	is.Eq(len(reqs), 1)
+	exc := reqs[0].ev["exception"].(map[string]any)
 	val := exc["values"].([]any)[0].(map[string]any)
 	stack := val["stacktrace"].(map[string]any)
 	frames := stack["frames"].([]any)
@@ -194,13 +138,13 @@ func TestCaptureExceptionFallsBackToCallerStack(t *testing.T) {
 func TestCaptureMessageHeadersAndShape(t *testing.T) {
 	is := is.New(t)
 	resetActive(t)
-	cs := newCaptureServer(t, 200)
-	defer cs.Close()
+	srv := newSockeyeServer(t)
+	defer srv.Close()
 
 	err := Init(Options{
 		DSN:          testDSN,
 		Environment:  "test",
-		HTTPClient:   rewriteTransport(cs.URL),
+		HTTPClient:   rewriteTransport(srv.URL),
 		SyncDispatch: true,
 	})
 	is.NoErr(err)
@@ -208,17 +152,15 @@ func TestCaptureMessageHeadersAndShape(t *testing.T) {
 
 	CaptureMessage("hello world", WithExtra("k", "v"), WithFingerprint("a", "b"), WithLevel("warning"))
 
-	cs.mu.Lock()
-	h := cs.headers[0]
-	cs.mu.Unlock()
-	got := h.Get("Content-Type")
-	is.Eq(got, "application/x-sentry-envelope")
-	is.True(strings.HasPrefix(h.Get("X-Sentry-Auth"), "Sentry "))
+	reqs := srv.requests()
+	is.Eq(len(reqs), 1)
+	r := reqs[0]
+	is.Eq(r.ct, "application/json")
+	is.Eq(r.auth, "Bearer sek_test")
 
-	ev := cs.firstEvent(t)
+	ev := r.ev
 	is.Eq(ev["level"], "warning")
-	msg := ev["message"].(map[string]any)
-	is.Eq(msg["formatted"], "hello world")
+	is.Eq(ev["message"], "hello world")
 	extra := ev["extra"].(map[string]any)
 	is.Eq(extra["k"], "v")
 	fp := ev["fingerprint"].([]any)
@@ -239,21 +181,18 @@ func TestCaptureNoOpWhenDSNEmpty(t *testing.T) {
 func TestCaptureExceptionReturnsEmptyForNilError(t *testing.T) {
 	is := is.New(t)
 	resetActive(t)
-	cs := newCaptureServer(t, 200)
-	defer cs.Close()
+	srv := newSockeyeServer(t)
+	defer srv.Close()
 	err := Init(Options{
 		DSN:          testDSN,
-		HTTPClient:   rewriteTransport(cs.URL),
+		HTTPClient:   rewriteTransport(srv.URL),
 		SyncDispatch: true,
 	})
 	is.NoErr(err)
 	defer Flush(time.Second)
 	got := CaptureException(nil)
 	is.Eq(got, "")
-	cs.mu.Lock()
-	n := len(cs.events)
-	cs.mu.Unlock()
-	is.Eq(n, 0)
+	is.Eq(len(srv.requests()), 0)
 }
 
 func TestSendRetriesTransientThenSucceeds(t *testing.T) {
@@ -454,41 +393,41 @@ func TestErrorTypeNameSkipsJoinWrapper(t *testing.T) {
 func TestClockOptionSetsTimestamps(t *testing.T) {
 	is := is.New(t)
 	resetActive(t)
-	cs := newCaptureServer(t, 200)
-	defer cs.Close()
+	srv := newSockeyeServer(t)
+	defer srv.Close()
 
 	fixed := time.Date(2026, 10, 12, 14, 0, 0, 0, time.UTC)
 	err := Init(Options{
 		DSN:          testDSN,
 		Clock:        func() time.Time { return fixed },
-		HTTPClient:   rewriteTransport(cs.URL),
+		HTTPClient:   rewriteTransport(srv.URL),
 		SyncDispatch: true,
 	})
 	is.NoErr(err)
 	defer Flush(time.Second)
 
 	CaptureMessage("timed message")
-	ev := cs.firstEvent(t)
+	ev := srv.firstEvent(t)
 	is.Eq(ev["timestamp"], "2026-10-12T14:00:00Z")
 }
 
 func TestInAppPrefixOption(t *testing.T) {
 	is := is.New(t)
 	resetActive(t)
-	cs := newCaptureServer(t, 200)
-	defer cs.Close()
+	srv := newSockeyeServer(t)
+	defer srv.Close()
 
 	err := Init(Options{
 		DSN:          testDSN,
 		InAppPrefix:  "github.com/croaky/errs",
-		HTTPClient:   rewriteTransport(cs.URL),
+		HTTPClient:   rewriteTransport(srv.URL),
 		SyncDispatch: true,
 	})
 	is.NoErr(err)
 	defer Flush(time.Second)
 
 	CaptureException(errors.New("prefix test"))
-	ev := cs.firstEvent(t)
+	ev := srv.firstEvent(t)
 	exc := ev["exception"].(map[string]any)
 	val := exc["values"].([]any)[0].(map[string]any)
 	stack := val["stacktrace"].(map[string]any)
