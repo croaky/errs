@@ -42,7 +42,7 @@ shellcheck: git ls-files -z 'scripts/*' '*.sh' | xargs -0 shellcheck
 # rewrote a file would have nowhere to put it.
 fmt: dprint check
 
-weekly_govulncheck: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+weekly_govulncheck: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
 # The title a change needs to merge, and the body rules that come
 # with it. sockeye reads this from main at merge.
