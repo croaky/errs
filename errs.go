@@ -18,8 +18,8 @@ import (
 
 const (
 	sdkName         = "croaky.errs"
-	sdkVersion      = "0.4.0"
-	userAgent       = "croaky-errs-go/0.4.0"
+	sdkVersion      = "0.5.0"
+	userAgent       = "croaky-errs-go/0.5.0"
 	maxMessageBytes = 8192
 	queueLimit      = 1000
 )
@@ -116,6 +116,11 @@ type client struct {
 	buckets   map[string]*bucket
 	failures  int
 	openUntil time.Time
+
+	// perf sends request records. It starts on the first
+	// RecordRequest. See perf.go.
+	perfOnce sync.Once
+	perf     atomic.Pointer[perfSender]
 }
 
 func (c *client) now() time.Time {
@@ -183,7 +188,8 @@ func Init(opts Options) error {
 	return nil
 }
 
-// Flush waits for queued events to send up to the timeout.
+// Flush waits for queued events and request records to send, up to
+// the timeout.
 func Flush(timeout time.Duration) {
 	c := active.Load()
 	if c == nil {
@@ -269,9 +275,16 @@ func (c *client) flush(timeout time.Duration) {
 		close(c.queue)
 		c.mu.Unlock()
 	}
+	perf := c.perf.Load()
+	if perf != nil {
+		perf.close()
+	}
 	done := make(chan struct{})
 	go func() {
 		c.wg.Wait()
+		if perf != nil {
+			<-perf.done
+		}
 		close(done)
 	}()
 	select {

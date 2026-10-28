@@ -7,4 +7,7 @@
 // Events are queued on a bounded channel and sent to sockeye over HTTP
 // with retries and backoff. The client includes sampling by error and
 // a circuit breaker.
+//
+// RecordRequest sends served requests to sockeye's perf page through a
+// sender of its own, with its own bounded queue and circuit breaker.
 package errs

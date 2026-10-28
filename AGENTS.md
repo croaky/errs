@@ -50,6 +50,8 @@ assertions from `github.com/croaky/is`.
 - `stack.go` — `Wrap`, `Errorf`, `PanicError`, stack program counter
   capture, and error chain walking.
 - `slog.go` — `SlogHandler`, which reports error-level slog records.
+- `perf.go` — `RecordRequest` and `DroppedRequests`, the request-record
+  sender for sockeye's perf page.
 - `doc.go` — package documentation.
 
 ## Checks
