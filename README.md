@@ -121,6 +121,14 @@ errs.RecordRequest(errs.Request{
 Pass a route with no query string and no ids, so each page is one row.
 `RecordRequest` removes a query string in all cases.
 
+For a standard Go `http.ServeMux`, set `Pattern: r.Pattern` after the
+handler returns. The client sends this optional matched pattern without
+changing its method, host, case or wildcard names. Sockeye uses it as
+the shared metrics and log-filter label. Include the same `pattern`
+field in the request log. A router that does not set `Request.Pattern`
+can leave it empty and keep the existing route behavior. Do not build a
+pattern from an untrusted URL.
+
 sockeye takes the records only after an operator names the service's
 producer: `soc perf source <repo>/<service> post`. Until then it
 refuses the batches with 409, and the client discards them.

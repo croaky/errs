@@ -19,8 +19,11 @@ type Request struct {
 	// Route names the page, with no query string and no ids:
 	// "/companies/show", not "/companies/show?id=42". RecordRequest
 	// removes a query string in all cases.
-	Route  string
-	Status int
+	Route string
+	// Pattern is the matched http.Request.Pattern, when the router supplies it.
+	// It stays exact, including method, host and wildcard names.
+	Pattern string
+	Status  int
 	// Duration is the whole request. DB is the time its queries took,
 	// and Acquire the time they waited for a pool connection.
 	Duration time.Duration
@@ -51,6 +54,7 @@ var perfEvery = 10 * time.Second
 // perfRecord is one request as sockeye's POST /perf reads it.
 type perfRecord struct {
 	Route      string    `json:"route"`
+	Pattern    string    `json:"pattern,omitempty"`
 	Status     int       `json:"status"`
 	DurationMs float64   `json:"duration_ms"`
 	DBMs       float64   `json:"db_ms"`
@@ -145,6 +149,7 @@ func (s *perfSender) add(r Request) {
 	}
 	rec := perfRecord{
 		Route:      route,
+		Pattern:    r.Pattern,
 		Status:     r.Status,
 		DurationMs: ms(r.Duration),
 		DBMs:       ms(r.DB),

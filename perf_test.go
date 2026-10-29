@@ -217,3 +217,14 @@ func TestRecordRequestOff(t *testing.T) {
 	RecordRequest(Request{Route: "/x", Status: 200})
 	is.Eq(DroppedRequests(), int64(0))
 }
+
+func TestMatchedPatternPreserved(t *testing.T) {
+	c := &client{}
+	s := &perfSender{c: c, queue: make(chan perfRecord, 1)}
+	const pattern = "GET example.com/b/{bucket}/o/{name...}"
+	s.add(Request{Route: "/b/photos/o/a/b?secret=removed", Pattern: pattern, Status: 200, Time: time.Now()})
+	r := <-s.queue
+	if r.Pattern != pattern || r.Route != "/b/photos/o/a/b" {
+		t.Fatalf("pattern/path changed: %#v", r)
+	}
+}
