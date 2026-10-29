@@ -29,6 +29,11 @@ type Request struct {
 	Duration time.Duration
 	DB       time.Duration
 	Acquire  time.Duration
+	// DBTimed says the service measured DB and Acquire, so a zero is a
+	// request with no database time. When it is false, RecordRequest
+	// sends neither, and sockeye shows the request as untimed rather
+	// than as zero database work.
+	DBTimed bool
 	// Time is when the request happened. Zero means now.
 	Time time.Time
 }
@@ -57,8 +62,8 @@ type perfRecord struct {
 	Pattern    string    `json:"pattern,omitempty"`
 	Status     int       `json:"status"`
 	DurationMs float64   `json:"duration_ms"`
-	DBMs       float64   `json:"db_ms"`
-	AcquireMs  float64   `json:"acquire_ms"`
+	DBMs       *float64  `json:"db_ms,omitempty"`
+	AcquireMs  *float64  `json:"acquire_ms,omitempty"`
 	Time       time.Time `json:"time"`
 }
 
@@ -152,9 +157,11 @@ func (s *perfSender) add(r Request) {
 		Pattern:    r.Pattern,
 		Status:     r.Status,
 		DurationMs: ms(r.Duration),
-		DBMs:       ms(r.DB),
-		AcquireMs:  ms(r.Acquire),
 		Time:       at.UTC(),
+	}
+	if r.DBTimed {
+		db, acquire := ms(r.DB), ms(r.Acquire)
+		rec.DBMs, rec.AcquireMs = &db, &acquire
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

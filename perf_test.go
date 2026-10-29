@@ -110,6 +110,12 @@ func TestRecordRequestBatches(t *testing.T) {
 	is.Eq(len(posts[0].records), perfBatchMax)
 	is.Eq(posts[0].records[0]["duration_ms"], 12.0)
 	is.Eq(posts[0].records[0]["time"], "2026-10-28T12:00:00Z")
+	// A record whose service did not mark its database timing as
+	// measured carries neither key, so sockeye reads it as untimed.
+	_, hasDB := posts[0].records[0]["db_ms"]
+	_, hasAcquire := posts[0].records[0]["acquire_ms"]
+	is.True(!hasDB)
+	is.True(!hasAcquire)
 
 	// A heartbeat can land before the next record, so find the batch
 	// that holds it, and an empty batch after it.
@@ -128,6 +134,28 @@ func TestRecordRequestBatches(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// TestRecordRequestDBTimed: a record marked DBTimed carries db_ms and
+// acquire_ms, a 0 too, since a request with no queries did measure
+// zero database time.
+func TestRecordRequestDBTimed(t *testing.T) {
+	is := is.New(t)
+	srv := newPerfServer(t)
+	initPerf(t, srv)
+
+	RecordRequest(Request{Route: "/t", Status: 200, DB: 30 * time.Millisecond, Acquire: time.Millisecond, DBTimed: true})
+	RecordRequest(Request{Route: "/z", Status: 200, DBTimed: true})
+	Flush(time.Second)
+	var recs []map[string]any
+	for _, p := range srv.received() {
+		recs = append(recs, p.records...)
+	}
+	is.Eq(len(recs), 2)
+	is.Eq(recs[0]["db_ms"], 30.0)
+	is.Eq(recs[0]["acquire_ms"], 1.0)
+	is.Eq(recs[1]["db_ms"], 0.0)
+	is.Eq(recs[1]["acquire_ms"], 0.0)
 }
 
 // TestRecordRequestRetry: a 503 and then a 202 carry the same

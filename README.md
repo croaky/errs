@@ -114,9 +114,16 @@ errs.RecordRequest(errs.Request{
 	Duration: time.Since(start),
 	DB:       dbTime,
 	Acquire:  poolWait,
+	DBTimed:  true,
 	Time:     start,
 })
 ```
+
+Set `DBTimed` only when the service measures its query time and pool
+wait, as a pgx query tracer does. Then a request with no queries sends
+`db_ms: 0`. Without `DBTimed`, the client sends no `db_ms` and no
+`acquire_ms`, and sockeye's perf page shows the request's database
+work as unavailable, not as zero.
 
 Pass a route with no query string and no ids, so each page is one row.
 `RecordRequest` removes a query string in all cases.
