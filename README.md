@@ -125,6 +125,14 @@ wait, as a pgx query tracer does. Then a request with no queries sends
 `acquire_ms`, and sockeye's perf page shows the request's database
 work as unavailable, not as zero.
 
+`DB` and `Acquire` add up work: queries that run at the same time each
+count, so they can be more than `Duration`. To show where the wall
+time went, set `Elapsed` to a `DBElapsed`: the time in which only
+queries ran, only pool waits ran, or both. The three never overlap, so
+their sum is at most `Duration`, and sockeye shows them with the time
+in which neither ran as four shares of the request. A nil `Elapsed`
+sends no split.
+
 Pass a route with no query string and no ids, so each page is one row.
 `RecordRequest` removes a query string in all cases.
 

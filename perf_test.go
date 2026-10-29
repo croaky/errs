@@ -156,6 +156,29 @@ func TestRecordRequestDBTimed(t *testing.T) {
 	is.Eq(recs[0]["acquire_ms"], 1.0)
 	is.Eq(recs[1]["db_ms"], 0.0)
 	is.Eq(recs[1]["acquire_ms"], 0.0)
+	// No Elapsed, no split keys.
+	_, hasSplit := recs[0]["query_only_ms"]
+	is.True(!hasSplit)
+}
+
+// TestRecordRequestElapsed: a record with Elapsed carries all three
+// split keys, zeros too, so sockeye counts the split as measured.
+func TestRecordRequestElapsed(t *testing.T) {
+	is := is.New(t)
+	srv := newPerfServer(t)
+	initPerf(t, srv)
+
+	RecordRequest(Request{Route: "/e", Status: 200, Duration: 20 * time.Millisecond,
+		Elapsed: &DBElapsed{QueryOnly: 10 * time.Millisecond, WaitOnly: 2 * time.Millisecond}})
+	Flush(time.Second)
+	var recs []map[string]any
+	for _, p := range srv.received() {
+		recs = append(recs, p.records...)
+	}
+	is.Eq(len(recs), 1)
+	is.Eq(recs[0]["query_only_ms"], 10.0)
+	is.Eq(recs[0]["wait_only_ms"], 2.0)
+	is.Eq(recs[0]["query_wait_ms"], 0.0)
 }
 
 // TestRecordRequestRetry: a 503 and then a 202 carry the same

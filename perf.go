@@ -34,8 +34,23 @@ type Request struct {
 	// sends neither, and sockeye shows the request as untimed rather
 	// than as zero database work.
 	DBTimed bool
+	// Elapsed is the request's wall time split by what ran: only
+	// queries, only pool waits, or both at once. The rest is time in
+	// which neither ran. nil sends no split, and sockeye shows none.
+	Elapsed *DBElapsed
 	// Time is when the request happened. Zero means now.
 	Time time.Time
+}
+
+// DBElapsed is a request's wall time in which only queries ran, only
+// pool waits ran, or both ran at once. The three never overlap, so
+// their sum is at most the request's Duration. DB and Acquire add up
+// work, and can be more than Duration when queries run at the same
+// time; these do not.
+type DBElapsed struct {
+	QueryOnly    time.Duration
+	WaitOnly     time.Duration
+	QueryAndWait time.Duration
 }
 
 const (
@@ -58,13 +73,16 @@ var perfEvery = 10 * time.Second
 
 // perfRecord is one request as sockeye's POST /perf reads it.
 type perfRecord struct {
-	Route      string    `json:"route"`
-	Pattern    string    `json:"pattern,omitempty"`
-	Status     int       `json:"status"`
-	DurationMs float64   `json:"duration_ms"`
-	DBMs       *float64  `json:"db_ms,omitempty"`
-	AcquireMs  *float64  `json:"acquire_ms,omitempty"`
-	Time       time.Time `json:"time"`
+	Route       string    `json:"route"`
+	Pattern     string    `json:"pattern,omitempty"`
+	Status      int       `json:"status"`
+	DurationMs  float64   `json:"duration_ms"`
+	DBMs        *float64  `json:"db_ms,omitempty"`
+	AcquireMs   *float64  `json:"acquire_ms,omitempty"`
+	QueryOnlyMs *float64  `json:"query_only_ms,omitempty"`
+	WaitOnlyMs  *float64  `json:"wait_only_ms,omitempty"`
+	QueryWaitMs *float64  `json:"query_wait_ms,omitempty"`
+	Time        time.Time `json:"time"`
 }
 
 // perfSender sends request records to sockeye. It shares the DSN with
@@ -162,6 +180,10 @@ func (s *perfSender) add(r Request) {
 	if r.DBTimed {
 		db, acquire := ms(r.DB), ms(r.Acquire)
 		rec.DBMs, rec.AcquireMs = &db, &acquire
+	}
+	if e := r.Elapsed; e != nil {
+		q, w, b := ms(e.QueryOnly), ms(e.WaitOnly), ms(e.QueryAndWait)
+		rec.QueryOnlyMs, rec.WaitOnlyMs, rec.QueryWaitMs = &q, &w, &b
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
