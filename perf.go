@@ -3,9 +3,11 @@ package errs
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,7 +42,34 @@ type Request struct {
 	Elapsed *DBElapsed
 	// Time is when the request happened. Zero means now.
 	Time time.Time
+	// User is the service's id for the signed-in user. sockeye counts
+	// the user's requests for each route and day, and stores no other
+	// fact about the user. Send an id, not a name or an email address.
+	// RecordRequest cuts a user past 64 bytes, and sends none that
+	// holds a control character.
+	User string
+	// Method is the HTTP method. RecordRequest sends it in uppercase,
+	// and sends none past 16 letters.
+	Method string
+	// Extra holds properties of a request the service chose to
+	// inspect, such as a search's filters or an MCP tool's name and
+	// arguments. sockeye keeps a row for each record that has it. Keys
+	// must match [a-z0-9_] and be at most 64 bytes, and the JSON must
+	// be at most 2 KiB. RecordRequest replaces an Extra that breaks a
+	// limit with a note that says which, so one record does not fail
+	// its batch. Do not put a token, a password, a cookie, or a mail
+	// body in it.
+	Extra map[string]any
 }
+
+const (
+	perfUserMax   = 64
+	perfMethodMax = 16
+	perfExtraMax  = 2 << 10 // 2 KiB, sockeye's limit
+)
+
+// perfExtraKey is the form sockeye takes for an Extra key.
+var perfExtraKey = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
 
 // DBElapsed is a request's wall time in which only queries ran, only
 // pool waits ran, or both ran at once. The three never overlap, so
@@ -73,16 +102,64 @@ var perfEvery = 10 * time.Second
 
 // perfRecord is one request as sockeye's POST /perf reads it.
 type perfRecord struct {
-	Route       string    `json:"route"`
-	Pattern     string    `json:"pattern,omitempty"`
-	Status      int       `json:"status"`
-	DurationMs  float64   `json:"duration_ms"`
-	DBMs        *float64  `json:"db_ms,omitempty"`
-	AcquireMs   *float64  `json:"acquire_ms,omitempty"`
-	QueryOnlyMs *float64  `json:"query_only_ms,omitempty"`
-	WaitOnlyMs  *float64  `json:"wait_only_ms,omitempty"`
-	QueryWaitMs *float64  `json:"query_wait_ms,omitempty"`
-	Time        time.Time `json:"time"`
+	Route       string          `json:"route"`
+	Pattern     string          `json:"pattern,omitempty"`
+	Status      int             `json:"status"`
+	DurationMs  float64         `json:"duration_ms"`
+	DBMs        *float64        `json:"db_ms,omitempty"`
+	AcquireMs   *float64        `json:"acquire_ms,omitempty"`
+	QueryOnlyMs *float64        `json:"query_only_ms,omitempty"`
+	WaitOnlyMs  *float64        `json:"wait_only_ms,omitempty"`
+	QueryWaitMs *float64        `json:"query_wait_ms,omitempty"`
+	Time        time.Time       `json:"time"`
+	User        string          `json:"user,omitempty"`
+	Method      string          `json:"method,omitempty"`
+	Extra       json.RawMessage `json:"extra,omitempty"`
+}
+
+// perfUser returns the user as sockeye takes it: cut to perfUserMax
+// bytes, or "" when it holds a control character.
+func perfUser(u string) string {
+	if strings.ContainsAny(u, "\r\n\x00") {
+		return ""
+	}
+	if len(u) > perfUserMax {
+		u = strings.ToValidUTF8(u[:perfUserMax], "")
+	}
+	return u
+}
+
+// perfMethod returns the method in uppercase, or "" when it is not
+// one to sixteen letters.
+func perfMethod(m string) string {
+	m = strings.ToUpper(m)
+	if len(m) > perfMethodMax || strings.ContainsFunc(m, func(c rune) bool { return c < 'A' || c > 'Z' }) {
+		return ""
+	}
+	return m
+}
+
+// perfExtra encodes extra as sockeye takes it. An extra that breaks a
+// limit becomes a note that says which, since sockeye refuses the
+// whole batch for one bad record.
+func perfExtra(extra map[string]any) json.RawMessage {
+	if extra == nil {
+		return nil
+	}
+	for k := range extra {
+		if !perfExtraKey.MatchString(k) {
+			b, _ := json.Marshal(map[string]string{"invalid": fmt.Sprintf("extra key %q must match [a-z0-9_] and be at most 64 bytes", k)})
+			return b
+		}
+	}
+	b, err := json.Marshal(extra)
+	switch {
+	case err != nil:
+		b, _ = json.Marshal(map[string]string{"invalid": "extra is not valid JSON: " + err.Error()})
+	case len(b) > perfExtraMax:
+		b, _ = json.Marshal(map[string]string{"truncated": fmt.Sprintf("extra was %d bytes; the limit is %d", len(b), perfExtraMax)})
+	}
+	return b
 }
 
 // perfSender sends request records to sockeye. It shares the DSN with
@@ -176,6 +253,9 @@ func (s *perfSender) add(r Request) {
 		Status:     r.Status,
 		DurationMs: ms(r.Duration),
 		Time:       at.UTC(),
+		User:       perfUser(r.User),
+		Method:     perfMethod(r.Method),
+		Extra:      perfExtra(r.Extra),
 	}
 	if r.DBTimed {
 		db, acquire := ms(r.DB), ms(r.Acquire)
@@ -309,6 +389,11 @@ func (s *perfSender) post(body []byte, key string, unsent int64, oldest time.Tim
 		req.Header.Set("Idempotency-Key", key)
 		if unsent > 0 {
 			req.Header.Set("Dropped-Records", strconv.FormatInt(unsent, 10))
+		}
+		// Every batch from a client that captures usage says so, an
+		// empty one too, so sockeye reads its minutes as covered.
+		if s.c.captureUsage {
+			req.Header.Set("Perf-Capture", "usage")
 		}
 		resp, err := s.c.httpClient.Do(req)
 		if err != nil {

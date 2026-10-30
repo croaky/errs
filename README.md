@@ -10,7 +10,7 @@ sites, and `Wrap` and `Errorf` to attach caller stack traces.
 ## Installation
 
 ```sh
-go get github.com/croaky/errs@v0.5.0
+go get github.com/croaky/errs@v0.9.0
 ```
 
 ## Usage
@@ -143,6 +143,35 @@ the shared metrics and log-filter label. Include the same `pattern`
 field in the request log. A router that does not set `Request.Pattern`
 can leave it empty and keep the existing route behavior. Do not build a
 pattern from an untrusted URL.
+
+A record can also say who made the request and what it asked for:
+
+```go
+errs.RecordRequest(errs.Request{
+	Route:  "/search",
+	Status: 200,
+	User:   strconv.FormatInt(userID, 10),
+	Method: r.Method,
+	Extra:  map[string]any{"q": q, "sort": sort},
+	// ...
+})
+```
+
+`User` is the service's own id for the signed-in user. sockeye counts
+requests for each route, user, and day, and stores no other fact about
+the user, so send an id, not a name or an email address. Set
+`Options.CaptureUsage` when the service sets `User` on the requests it
+counts. Each batch then carries the header `Perf-Capture: usage`, and
+sockeye reads the time as covered for usage rather than as no data.
+
+`Extra` is for a request the service chose to inspect, such as a
+search's filters or an MCP tool's name and arguments, and sockeye keeps
+a row for each record that has it. Its keys must match `[a-z0-9_]`, and
+its JSON must be at most 2 KiB. `RecordRequest` replaces an `Extra`
+that breaks a limit with an `invalid` or `truncated` note, because
+sockeye refuses a whole batch for one bad record. It cuts a `User` past
+64 bytes and drops a `Method` that is not one to sixteen letters. Do
+not send a token, a password, a cookie, or a mail body.
 
 sockeye takes the records only after an operator names the service's
 producer: `soc perf source <repo>/<service> post`. Until then it

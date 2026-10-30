@@ -2,10 +2,12 @@ package errs
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,9 +17,9 @@ import (
 
 // perfPost is one request the perf test server received.
 type perfPost struct {
-	path, auth, key, dropped string
-	body                     string
-	records                  []map[string]any
+	path, auth, key, dropped, capture string
+	body                              string
+	records                           []map[string]any
 }
 
 // perfServer records each POST and answers with the next status in
@@ -41,7 +43,8 @@ func newPerfServer(t *testing.T, statuses ...int) *perfServer {
 		_ = json.Unmarshal(body, &recs)
 		s.mu.Lock()
 		s.posts = append(s.posts, perfPost{r.URL.Path, r.Header.Get("Authorization"),
-			r.Header.Get("Idempotency-Key"), r.Header.Get("Dropped-Records"), string(body), recs})
+			r.Header.Get("Idempotency-Key"), r.Header.Get("Dropped-Records"),
+			r.Header.Get("Perf-Capture"), string(body), recs})
 		status := 202
 		if len(s.statuses) > 0 {
 			status, s.statuses = s.statuses[0], s.statuses[1:]
@@ -179,6 +182,67 @@ func TestRecordRequestElapsed(t *testing.T) {
 	is.Eq(recs[0]["query_only_ms"], 10.0)
 	is.Eq(recs[0]["wait_only_ms"], 2.0)
 	is.Eq(recs[0]["query_wait_ms"], 0.0)
+}
+
+// TestRecordRequestDetail: a record sends its user, method, and extra.
+// A record without them sends none of the keys. An extra too large or
+// with a key sockeye refuses becomes a small note, so one record does
+// not fail its batch. A user and a method past their limits are cut.
+func TestRecordRequestDetail(t *testing.T) {
+	is := is.New(t)
+	srv := newPerfServer(t)
+	initPerf(t, srv)
+
+	RecordRequest(Request{Route: "/s", Status: 200, User: "42", Method: "get",
+		Extra: map[string]any{"q": "acme", "page": 2}})
+	RecordRequest(Request{Route: "/p", Status: 200})
+	RecordRequest(Request{Route: "/big", Status: 200, Extra: map[string]any{"q": strings.Repeat("x", perfExtraMax)}})
+	RecordRequest(Request{Route: "/key", Status: 200, Extra: map[string]any{"Bad-Key": 1}})
+	RecordRequest(Request{Route: "/long", Status: 200, User: strings.Repeat("u", 100), Method: "PROPFINDPROPFINDX"})
+	Flush(time.Second)
+	var recs []map[string]any
+	for _, p := range srv.received() {
+		recs = append(recs, p.records...)
+	}
+	is.Eq(len(recs), 5)
+	is.Eq(recs[0]["user"], "42")
+	is.Eq(recs[0]["method"], "GET")
+	is.Eq(recs[0]["extra"], map[string]any{"q": "acme", "page": 2.0})
+	for _, k := range []string{"user", "method", "extra"} {
+		if _, ok := recs[1][k]; ok {
+			t.Errorf("record with no %s sent %s", k, k)
+		}
+	}
+	is.Eq(recs[2]["extra"], map[string]any{"truncated": fmt.Sprintf("extra was %d bytes; the limit is %d", perfExtraMax+8, perfExtraMax)})
+	is.Eq(recs[3]["extra"], map[string]any{"invalid": `extra key "Bad-Key" must match [a-z0-9_] and be at most 64 bytes`})
+	is.Eq(len(recs[4]["user"].(string)), perfUserMax)
+	_, hasMethod := recs[4]["method"]
+	is.True(!hasMethod)
+}
+
+// TestRecordRequestCaptureUsage: with CaptureUsage, every batch, an
+// empty one too, carries Perf-Capture: usage, so sockeye reads the
+// minutes as usage-covered. Without it, no batch carries the header.
+func TestRecordRequestCaptureUsage(t *testing.T) {
+	is := is.New(t)
+	srv := newPerfServer(t)
+	resetActive(t)
+	is.NoErr(Init(Options{DSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), CaptureUsage: true}))
+	RecordRequest(Request{Route: "/a", Status: 200, User: "1"})
+	Flush(time.Second)
+	posts := srv.received()
+	is.True(len(posts) >= 1)
+	for _, p := range posts {
+		is.Eq(p.capture, "usage")
+	}
+
+	srv2 := newPerfServer(t)
+	initPerf(t, srv2)
+	RecordRequest(Request{Route: "/a", Status: 200})
+	Flush(time.Second)
+	for _, p := range srv2.received() {
+		is.Eq(p.capture, "")
+	}
 }
 
 // TestRecordRequestRetry: a 503 and then a 202 carry the same

@@ -53,6 +53,11 @@ type Options struct {
 	SyncDispatch bool
 	InAppPrefix  string
 	Clock        func() time.Time
+	// CaptureUsage says that the service sets Request.User on the
+	// requests it counts, such as every signed-in request. Each perf
+	// batch then carries the header Perf-Capture: usage, and sockeye
+	// reads the time as covered for usage, not as no data.
+	CaptureUsage bool
 }
 
 // Option modifies an outgoing event.
@@ -102,6 +107,7 @@ type client struct {
 	clock        func() time.Time
 	httpClient   *http.Client
 	syncDispatch bool
+	captureUsage bool
 
 	mu     sync.Mutex
 	queue  chan *event
@@ -177,6 +183,7 @@ func Init(opts Options) error {
 		clock:        opts.Clock,
 		httpClient:   hc,
 		syncDispatch: opts.SyncDispatch,
+		captureUsage: opts.CaptureUsage,
 		queue:        make(chan *event, queueLimit),
 		buckets:      map[string]*bucket{},
 	}

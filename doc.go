@@ -9,5 +9,7 @@
 // a circuit breaker.
 //
 // RecordRequest sends served requests to sockeye's perf page through a
-// sender of its own, with its own bounded queue and circuit breaker.
+// sender of its own, with its own bounded queue and circuit breaker. A
+// request can carry a user id for usage counts and extra properties
+// for a request the service chose to inspect.
 package errs
