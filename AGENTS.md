@@ -56,27 +56,40 @@ assertions from `github.com/croaky/is`.
 
 ## Checks
 
-Pin every tool a check runs. Name its version in the command, as in
-`go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...`. Do not use
-`@latest` in a `Checkfile`, a script, or CI. A moving version makes the
-same commit pass one week and fail the next, and it runs new tool code
-nobody reviewed. A pinned tool changes in a change, where the diff shows
-the update and CI runs it. This module keeps tools out of `go.mod` so
-its dependency list stays what its users need. Pin the tool, not its
-data. `govulncheck` reads the live vulnerability database on every run,
-so the weekly scan still finds advisories published after the commit.
-Never vendor or cache that data.
+Pin every tool a check runs. `tools.mod` and `tools.sum` hold the
+version and checksum of each tool. Run a tool as
+`go tool -modfile=tools.mod <name>`. Add or update a tool with
+`go get -modfile=tools.mod -tool <pkg>@<version>`. Do not run
+`go run pkg@latest` or `go install pkg@latest` in a `Checkfile`, a
+script, or CI. A moving version makes the same commit pass one week
+and fail the next, and it runs new tool code nobody reviewed. A pinned
+tool changes in a change, where the diff shows the update and CI runs
+it.
+
+Keep the tools out of `go.mod`. A `tool` line there puts the tool's
+requirements in the module graph of every module that requires this
+one. `tools.mod` names this module, but only
+`go tool -modfile=tools.mod` reads it. The tool then reads `go.mod`,
+so `govulncheck` scans the versions this module ships. Do not run
+`go mod tidy -modfile=tools.mod`, because it copies the requirements
+of `go.mod` into `tools.mod`. An app that no module requires puts its
+`tool` lines in `go.mod`, unless a tool raises a requirement that the
+app builds with.
+
+Pin the tool, not its data. `govulncheck` reads the live vulnerability
+database on every run, so the weekly scan still finds advisories
+published after the commit. Never vendor or cache that data.
 
 The root `Checkfile` is the list, and CI runs it on every push. Run the
 same things before committing, since a check that fails locally fails
 there:
 
 ```sh
-go run golang.org/x/tools/cmd/goimports@v0.45.0 -local "$(go list -m)" -w .
+go tool -modfile=tools.mod goimports -local "$(go list -m)" -w .
 go vet ./...
 go test -trimpath -buildvcs=false -race -cover ./...
 git ls-files -z '*.go' | xargs -0 gopls check -severity=hint
-go run golang.org/x/tools/cmd/deadcode@v0.45.0 -test ./...
+go tool -modfile=tools.mod deadcode -test ./...
 git ls-files -z 'scripts/*' '*.sh' | xargs -0 shellcheck
 dprint fmt
 ```
