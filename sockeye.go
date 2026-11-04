@@ -2,7 +2,9 @@ package errs
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
+	"fmt"
 	"maps"
 	"net/http"
 	"regexp"
@@ -30,6 +32,33 @@ var breakerPauses = []time.Duration{
 	2 * time.Minute,
 	5 * time.Minute,
 	10 * time.Minute,
+}
+
+// wireJSON holds the encode options for each body errs posts. An
+// encode that fails drops the record, so errs keeps two v1 behaviors
+// that v2 makes strict. A string with invalid UTF-8, such as command
+// output in an error message, goes out with U+FFFD in place of each
+// bad byte. A time.Duration, which v2 refuses with no format tag, goes
+// out as integer nanoseconds.
+var wireJSON = json.JoinOptions(
+	jsontext.AllowInvalidUTF8(true),
+	json.WithMarshalers(json.MarshalToFunc(func(enc *jsontext.Encoder, d time.Duration) error {
+		return enc.WriteToken(jsontext.Int(int64(d)))
+	})),
+)
+
+// printExtra returns extra with each value that JSON cannot encode,
+// such as an error, a channel, or a NaN, replaced by its fmt.Sprint
+// text, so one value does not drop the event.
+func printExtra(extra map[string]any) map[string]any {
+	out := make(map[string]any, len(extra))
+	for k, v := range extra {
+		if _, err := json.Marshal(v, wireJSON); err != nil {
+			v = fmt.Sprint(v)
+		}
+		out[k] = v
+	}
+	return out
 }
 
 func breakerPause(failures int) time.Duration {
@@ -133,14 +162,15 @@ func (c *client) post(e *event, count int) {
 		}
 		e.Extra["dropped"] = dropped
 	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(e); err != nil {
+	body, err := json.Marshal(e, wireJSON)
+	if err != nil && e.Extra != nil {
+		e.Extra = printExtra(e.Extra)
+		body, err = json.Marshal(e, wireJSON)
+	}
+	if err != nil {
 		c.dropped.Add(dropped + int64(lost))
 		return
 	}
-	body := buf.Bytes()
 
 	ok := c.deliver("sockeye", func() (*http.Request, error) {
 		req, err := http.NewRequest(http.MethodPost, c.dsn.endpoint, bytes.NewReader(body))

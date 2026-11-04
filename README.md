@@ -200,6 +200,10 @@ The request path protects both ends of the connection too:
 ## Architecture
 
 - The client posts each event as JSON to sockeye with a Bearer key.
+- An encode does not drop an event. A string with invalid UTF-8 goes
+  with U+FFFD in place of each bad byte. A `time.Duration` in extra
+  goes as integer nanoseconds. An extra value that JSON cannot encode,
+  such as an error, goes as its `fmt.Sprint` text.
 - An asynchronous worker queues events up to 1,000 items and drops
   events when the queue is full.
 - The sender retries transport errors and transient HTTP status codes

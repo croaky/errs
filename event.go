@@ -25,7 +25,7 @@ type event struct {
 	Extra       map[string]any    `json:"extra,omitempty"`
 	Fingerprint []string          `json:"fingerprint,omitempty"`
 	Message     string            `json:"message,omitempty"`
-	Count       int               `json:"count,omitempty"`
+	Count       int               `json:"count,omitzero"`
 	Exception   *exceptionPayload `json:"exception,omitempty"`
 }
 

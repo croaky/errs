@@ -1,8 +1,10 @@
 package errs
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
+	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -406,4 +408,37 @@ func TestAsyncFlushSendsHeldCounts(t *testing.T) {
 		total += max(int(n), 1)
 	}
 	is.Eq(total, 25)
+}
+
+// TestSockeyeEventSurvivesBadValues: an event with invalid UTF-8 in its
+// message, a tag, and an extra value still reaches sockeye, with U+FFFD
+// in place of each bad byte. A time.Duration goes as integer
+// nanoseconds, as encoding/json v1 sent it. A value JSON cannot encode
+// goes as its fmt.Sprint text, and the rest of extra stays as it is.
+func TestSockeyeEventSurvivesBadValues(t *testing.T) {
+	is := is.New(t)
+	resetActive(t)
+	srv := newSockeyeServer(t)
+	defer srv.Close()
+	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), SyncDispatch: true}))
+	defer Flush(time.Second)
+
+	CaptureMessage("bad \xff byte",
+		WithTag("path", "/a\xffb"),
+		WithExtra("output", "x\xfey"),
+		WithExtra("took", 1500*time.Millisecond),
+		WithExtra("cause", errors.New("boom")),
+		WithExtra("ratio", math.NaN()),
+		WithExtra("page", 2),
+	)
+
+	ev := srv.firstEvent(t)
+	is.Eq(ev["message"], "bad \uFFFD byte")
+	is.Eq(ev["tags"].(map[string]any)["path"], "/a\uFFFDb")
+	extra := ev["extra"].(map[string]any)
+	is.Eq(extra["output"], "x\uFFFDy")
+	is.Eq(extra["took"], 1.5e9)
+	is.Eq(extra["cause"], "boom")
+	is.Eq(extra["ratio"], "NaN")
+	is.Eq(extra["page"], 2.0)
 }

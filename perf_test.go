@@ -1,7 +1,7 @@
 package errs
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"net/http"
@@ -342,4 +342,28 @@ func TestMatchedPatternPreserved(t *testing.T) {
 	if r.Pattern != pattern || r.Route != "/b/photos/o/a/b" {
 		t.Fatalf("pattern/path changed: %#v", r)
 	}
+}
+
+// TestRecordRequestExtraEncoding: a perf record with invalid UTF-8
+// still sends, with U+FFFD in place of each bad byte, and a
+// time.Duration in Extra goes as integer nanoseconds. An Extra that
+// JSON cannot encode becomes an invalid note that quotes the error.
+func TestRecordRequestExtraEncoding(t *testing.T) {
+	is := is.New(t)
+	srv := newPerfServer(t)
+	initPerf(t, srv)
+
+	RecordRequest(Request{Route: "/u\xff", Status: 200, User: "u\xff",
+		Extra: map[string]any{"q": "a\xffb", "took": 2 * time.Second}})
+	RecordRequest(Request{Route: "/c", Status: 200, Extra: map[string]any{"ch": make(chan int)}})
+	Flush(time.Second)
+	var recs []map[string]any
+	for _, p := range srv.received() {
+		recs = append(recs, p.records...)
+	}
+	is.Eq(len(recs), 2)
+	is.Eq(recs[0]["route"], "/u\uFFFD")
+	is.Eq(recs[0]["user"], "u\uFFFD")
+	is.Eq(recs[0]["extra"], map[string]any{"q": "a\uFFFDb", "took": 2e9})
+	is.Eq(recs[1]["extra"], map[string]any{"invalid": `extra is not valid JSON: json: cannot marshal from Go chan int within "/ch"`})
 }

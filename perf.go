@@ -2,7 +2,8 @@ package errs
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"log"
@@ -102,19 +103,19 @@ var perfEvery = 10 * time.Second
 
 // perfRecord is one request as sockeye's POST /perf reads it.
 type perfRecord struct {
-	Route       string          `json:"route"`
-	Pattern     string          `json:"pattern,omitempty"`
-	Status      int             `json:"status"`
-	DurationMs  float64         `json:"duration_ms"`
-	DBMs        *float64        `json:"db_ms,omitempty"`
-	AcquireMs   *float64        `json:"acquire_ms,omitempty"`
-	QueryOnlyMs *float64        `json:"query_only_ms,omitempty"`
-	WaitOnlyMs  *float64        `json:"wait_only_ms,omitempty"`
-	QueryWaitMs *float64        `json:"query_wait_ms,omitempty"`
-	Time        time.Time       `json:"time"`
-	User        string          `json:"user,omitempty"`
-	Method      string          `json:"method,omitempty"`
-	Extra       json.RawMessage `json:"extra,omitempty"`
+	Route       string         `json:"route"`
+	Pattern     string         `json:"pattern,omitempty"`
+	Status      int            `json:"status"`
+	DurationMs  float64        `json:"duration_ms"`
+	DBMs        *float64       `json:"db_ms,omitempty"`
+	AcquireMs   *float64       `json:"acquire_ms,omitempty"`
+	QueryOnlyMs *float64       `json:"query_only_ms,omitempty"`
+	WaitOnlyMs  *float64       `json:"wait_only_ms,omitempty"`
+	QueryWaitMs *float64       `json:"query_wait_ms,omitempty"`
+	Time        time.Time      `json:"time"`
+	User        string         `json:"user,omitempty"`
+	Method      string         `json:"method,omitempty"`
+	Extra       jsontext.Value `json:"extra,omitzero"`
 }
 
 // perfUser returns the user as sockeye takes it: cut to perfUserMax
@@ -142,7 +143,7 @@ func perfMethod(m string) string {
 // perfExtra encodes extra as sockeye takes it. An extra that breaks a
 // limit becomes a note that says which, since sockeye refuses the
 // whole batch for one bad record.
-func perfExtra(extra map[string]any) json.RawMessage {
+func perfExtra(extra map[string]any) jsontext.Value {
 	if extra == nil {
 		return nil
 	}
@@ -152,7 +153,7 @@ func perfExtra(extra map[string]any) json.RawMessage {
 			return b
 		}
 	}
-	b, err := json.Marshal(extra)
+	b, err := json.Marshal(extra, wireJSON)
 	switch {
 	case err != nil:
 		b, _ = json.Marshal(map[string]string{"invalid": "extra is not valid JSON: " + err.Error()})
@@ -335,7 +336,7 @@ func (s *perfSender) send(batch []perfRecord) {
 		return
 	}
 	unsent := s.unsent.Swap(0)
-	body, err := json.Marshal(batch)
+	body, err := json.Marshal(batch, wireJSON)
 	if err != nil {
 		s.unsent.Add(unsent)
 		s.drop(int64(len(batch)))
