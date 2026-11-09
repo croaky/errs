@@ -122,13 +122,29 @@ After a push, read the checks with `soc push --wait`.
 
 ## Commits
 
-- Prefix with what the change acts on: `errs:`, `doc:`, `ci:`.
-- Imperative mood, lowercase except proper nouns. Hard-wrap at 72.
-- Include why, not just what.
-- Write the subject for a teammate who has not read the code.
-- Write the body as a change description. The first push of a branch
-  with one commit copies the commit message to the change.
-- Sign your work with a `Co-Authored-By` trailer.
+- Subject: `scope: imperative summary`, at most 72 characters, lowercase
+  except proper nouns, no trailing period.
+- The scope is what the change acts on: `event:` for the error events,
+  `perf:` for the request records, `slog:`, `dsn:`, `stack:`. Not
+  `errs:`, because every commit here is errs.
+- Each repo also uses these scopes: `security:` for a fix to a security
+  finding, `deps:` for a dependency or the Go version, `doc:` for the
+  docs, `todo:` for a plan, and `ci:` for the Checkfile and its checks.
+- A change that acts on more than one area takes the scope whose
+  behavior changed. Write two scopes, with a comma between them, only
+  when each one changed: `event, perf:`.
+- The `merge:` line in the root `Checkfile` checks the change title at
+  merge. It caps the text after the scope at 64 characters.
+- Include _why_, not just _what_. Hard-wrap the body at 72.
+- Write the subject for a teammate who has not read the code. Name the
+  function, the field, or the request, not a term the change makes up.
+- Write the body as a change description. sockeye squashes a change into
+  one commit whose message is the change's title and description. The
+  first push of a branch with one commit copies the commit message to
+  the change.
+- Sign your work with a `Co-Authored-By` trailer at the end of the
+  message, after a blank line. A trailer on the line after the subject
+  becomes part of the subject.
 
 ## Releases
 
