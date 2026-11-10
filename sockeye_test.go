@@ -119,17 +119,17 @@ func TestSockeyeDSNAloneEnablesReporting(t *testing.T) {
 	defer srv.Close()
 
 	is.NoErr(Init(Options{
-		SockeyeDSN:   testSockeyeDSN,
-		Environment:  "test",
-		Release:      "abc123def",
-		ServerName:   "host-1",
-		HTTPClient:   rewriteTransport(srv.URL),
-		SyncDispatch: true,
+		SockeyeDSN:  testSockeyeDSN,
+		Environment: "test",
+		Release:     "abc123def",
+		ServerName:  "host-1",
+		HTTPClient:  rewriteTransport(srv.URL),
 	}))
 	defer Flush(time.Second)
 
 	err := Wrap(testCustomErr{}, "load page")
 	id := CaptureException(err, WithTag("job", "x"), WithRequestID("req-9"))
+	Flush(time.Second)
 	is.True(id != "")
 
 	reqs := srv.requests()
@@ -156,10 +156,11 @@ func TestSockeyeMessageIsAString(t *testing.T) {
 	resetActive(t)
 	srv := newSockeyeServer(t)
 	defer srv.Close()
-	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), SyncDispatch: true}))
+	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL)}))
 	defer Flush(time.Second)
 
 	CaptureMessage("deploy finished", WithLevel("info"))
+	Flush(time.Second)
 
 	reqs := srv.requests()
 	is.Eq(len(reqs), 1)
@@ -173,13 +174,13 @@ func TestSockeyeDSNAlias(t *testing.T) {
 	srv := newSockeyeServer(t)
 	defer srv.Close()
 	is.NoErr(Init(Options{
-		SockeyeDSN:   testSockeyeDSN,
-		HTTPClient:   rewriteTransport(srv.URL),
-		SyncDispatch: true,
+		SockeyeDSN: testSockeyeDSN,
+		HTTPClient: rewriteTransport(srv.URL),
 	}))
 	defer Flush(time.Second)
 
 	CaptureMessage("via alias")
+	Flush(time.Second)
 
 	reqs := srv.requests()
 	is.Eq(len(reqs), 1)
@@ -193,10 +194,9 @@ func TestSockeyeSamplingKeepsTheTotalExact(t *testing.T) {
 	defer srv.Close()
 	clock := newTestClock()
 	is.NoErr(Init(Options{
-		SockeyeDSN:   testSockeyeDSN,
-		HTTPClient:   rewriteTransport(srv.URL),
-		SyncDispatch: true,
-		Clock:        clock.Now,
+		SockeyeDSN: testSockeyeDSN,
+		HTTPClient: rewriteTransport(srv.URL),
+		Clock:      clock.Now,
 	}))
 
 	for range 30 {
@@ -223,13 +223,14 @@ func TestSockeyeSamplingKeepsErrorsApart(t *testing.T) {
 	resetActive(t)
 	srv := newSockeyeServer(t)
 	defer srv.Close()
-	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), SyncDispatch: true, Clock: newTestClock().Now}))
+	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), Clock: newTestClock().Now}))
 	defer Flush(time.Second)
 
 	for range fullPerWindow {
 		CaptureMessage("first")
 	}
 	CaptureMessage("second")
+	Flush(time.Second)
 
 	is.Eq(len(srv.requests()), fullPerWindow+1)
 }
@@ -240,14 +241,15 @@ func TestSockeyeSamplingStartsOverAfterTheWindow(t *testing.T) {
 	srv := newSockeyeServer(t)
 	defer srv.Close()
 	clock := newTestClock()
-	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), SyncDispatch: true, Clock: clock.Now}))
+	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), Clock: clock.Now}))
 	defer Flush(time.Second)
+	c := active.Load()
 
 	for range fullPerWindow {
-		CaptureMessage("again")
+		sendNow(c, "again")
 	}
 	clock.Advance(sampleWindow)
-	CaptureMessage("again")
+	sendNow(c, "again")
 
 	reqs := srv.requests()
 	is.Eq(len(reqs), fullPerWindow+1)
@@ -261,11 +263,11 @@ func TestFlushCountsSendsOnlyDueCounts(t *testing.T) {
 	srv := newSockeyeServer(t)
 	defer srv.Close()
 	clock := newTestClock()
-	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), SyncDispatch: true, Clock: clock.Now}))
+	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), Clock: clock.Now}))
 	c := active.Load()
 
 	for range fullPerWindow + 3 {
-		CaptureMessage("burst")
+		sendNow(c, "burst")
 	}
 	// Events 11 sent a count of 1; events 12 and 13 are held.
 	before := len(srv.requests())
@@ -286,21 +288,22 @@ func TestSockeyeBreakerOpensAndReportsDropped(t *testing.T) {
 	defer srv.Close()
 	srv.status.Store(500)
 	clock := newTestClock()
-	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), SyncDispatch: true, Clock: clock.Now}))
+	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), Clock: clock.Now}))
 	defer Flush(time.Second)
+	c := active.Load()
 
 	for i := range breakerFailures {
-		CaptureMessage("down", WithTag("i", string(rune('a'+i))))
+		sendNow(c, "down", WithTag("i", string(rune('a'+i))))
 	}
 	tries := len(srv.requests())
 	is.Eq(tries, breakerFailures*len(retryDelays))
 
-	CaptureMessage("while open")
+	sendNow(c, "while open")
 	is.Eq(len(srv.requests()), tries)
 
 	srv.status.Store(202)
 	clock.Advance(breakerPauses[0])
-	CaptureMessage("back")
+	sendNow(c, "back")
 
 	reqs := srv.requests()
 	last := reqs[len(reqs)-1]
@@ -308,7 +311,7 @@ func TestSockeyeBreakerOpensAndReportsDropped(t *testing.T) {
 	extra := last.ev["extra"].(map[string]any)
 	is.Eq(extra["dropped"], float64(breakerFailures+1))
 
-	CaptureMessage("after")
+	sendNow(c, "after")
 	reqs = srv.requests()
 	_, has := reqs[len(reqs)-1].ev["extra"]
 	is.True(!has)
@@ -321,17 +324,18 @@ func TestSockeyeBreakerReopensAfterOneFailedTry(t *testing.T) {
 	defer srv.Close()
 	srv.status.Store(500)
 	clock := newTestClock()
-	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), SyncDispatch: true, Clock: clock.Now}))
+	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), Clock: clock.Now}))
 	defer Flush(time.Second)
+	c := active.Load()
 
 	for range breakerFailures {
-		CaptureMessage("down")
+		sendNow(c, "down")
 	}
 	clock.Advance(breakerPauses[0])
 	before := len(srv.requests())
-	CaptureMessage("probe")
+	sendNow(c, "probe")
 	is.Eq(len(srv.requests()), before+len(retryDelays))
-	CaptureMessage("next")
+	sendNow(c, "next")
 	is.Eq(len(srv.requests()), before+len(retryDelays))
 }
 
@@ -342,23 +346,24 @@ func TestSockeyeBreakerPausesBackOff(t *testing.T) {
 	defer srv.Close()
 	srv.status.Store(500)
 	clock := newTestClock()
-	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), SyncDispatch: true, Clock: clock.Now}))
+	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), Clock: clock.Now}))
 	defer Flush(time.Second)
+	c := active.Load()
 
 	for range breakerFailures {
-		CaptureMessage("down")
+		sendNow(c, "down")
 	}
 
 	for i, pause := range breakerPauses {
 		// Just before the pause ends, breaker remains open.
 		clock.Advance(pause - time.Second)
 		before := len(srv.requests())
-		CaptureMessage("blocked")
+		sendNow(c, "blocked")
 		is.Eq(len(srv.requests()), before)
 
 		// Advance past the pause to allow one probe.
 		clock.Advance(time.Second)
-		CaptureMessage(string(rune('a' + i)))
+		sendNow(c, string(rune('a'+i)))
 		is.Eq(len(srv.requests()), before+len(retryDelays))
 	}
 }
@@ -420,7 +425,7 @@ func TestSockeyeEventSurvivesBadValues(t *testing.T) {
 	resetActive(t)
 	srv := newSockeyeServer(t)
 	defer srv.Close()
-	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), SyncDispatch: true}))
+	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL)}))
 	defer Flush(time.Second)
 
 	CaptureMessage("bad \xff byte",
@@ -431,6 +436,7 @@ func TestSockeyeEventSurvivesBadValues(t *testing.T) {
 		WithExtra("ratio", math.NaN()),
 		WithExtra("page", 2),
 	)
+	Flush(time.Second)
 
 	ev := srv.firstEvent(t)
 	is.Eq(ev["message"], "bad \uFFFD byte")
@@ -441,4 +447,37 @@ func TestSockeyeEventSurvivesBadValues(t *testing.T) {
 	is.Eq(extra["cause"], "boom")
 	is.Eq(extra["ratio"], "NaN")
 	is.Eq(extra["page"], 2.0)
+}
+
+// TestFlushCountsForgetsQuietErrors: after many errors with distinct
+// text, the worker's flushCounts keeps only the errors of the last
+// sample window.
+func TestFlushCountsForgetsQuietErrors(t *testing.T) {
+	is := is.New(t)
+	resetActive(t)
+	srv := newSockeyeServer(t)
+	defer srv.Close()
+	clock := newTestClock()
+	is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), Clock: clock.Now}))
+	defer Flush(time.Second)
+	c := active.Load()
+
+	for _, s := range []string{"a", "b", "c"} {
+		sendNow(c, "old "+s)
+	}
+	clock.Advance(sampleWindow)
+	sendNow(c, "new")
+	c.flushCounts(false)
+
+	c.breakerMu.Lock()
+	defer c.breakerMu.Unlock()
+	is.Eq(len(c.buckets), 1)
+}
+
+// sendNow runs a message event through c.send on the test goroutine, so
+// a test of sampling or of the breaker reads the result at once.
+func sendNow(c *client, msg string, opts ...Option) {
+	e := c.newEvent("info", opts)
+	e.Message = truncate(msg)
+	c.send(e)
 }

@@ -191,8 +191,8 @@ The request path protects both ends of the connection too:
   nothing.
 - Each batch has an `Idempotency-Key`, and each retry sends the same
   key and the same bytes, so sockeye counts a batch once. The sender
-  tries a batch three times, after `Retry-After` when the server sends
-  one.
+  tries a batch three times, after `Retry-After` (up to 10 seconds)
+  when the server sends one.
 - The sender has a circuit breaker of its own, on the schedule above.
   A broken perf endpoint does not stop errors, and the reverse.
 - The next batch reports the records the client dropped in a
@@ -211,5 +211,9 @@ The request path protects both ends of the connection too:
   events when the queue is full.
 - The sender retries transport errors and transient HTTP status codes
   (429, 500, 502, 503, 504) with backoff.
-- The sender obeys the `Retry-After` HTTP header.
+- The sender obeys the `Retry-After` HTTP header, up to 10 seconds. A
+  longer pause comes from the circuit breaker.
+- The client writes its own failure lines to stderr, not through the
+  global `log` logger. A host that bridges `log` into `SlogHandler`
+  does not turn a failed send into a new event.
 - Frames matching the application module path are marked as `in_app`.

@@ -6,7 +6,6 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -379,7 +378,7 @@ func (s *perfSender) post(body []byte, key string, unsent int64, oldest time.Tim
 		wait = retryDelays[min(i, len(retryDelays)-1)]
 		req, err := http.NewRequest(http.MethodPost, s.endpoint, bytes.NewReader(body))
 		if err != nil {
-			log.Printf("errs perf: build request: %v", err)
+			logger.Printf("errs perf: build request: %v", err)
 			return 0
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -410,7 +409,7 @@ func (s *perfSender) post(body []byte, key string, unsent int64, oldest time.Tim
 		}
 	}
 	if status/100 != 2 && status != 409 {
-		log.Printf("errs perf: send: HTTP %d after retries", status)
+		logger.Printf("errs perf: send: HTTP %d after retries", status)
 	}
 	return status
 }

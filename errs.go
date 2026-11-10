@@ -22,7 +22,16 @@ const (
 	userAgent       = "croaky-errs-go/0.5.0"
 	maxMessageBytes = 8192
 	queueLimit      = 1000
+	// maxRetryAfter caps the wait a server asks for in Retry-After.
+	// It equals the largest step of defaultRetryDelays. A server that
+	// needs a longer pause gets one from the circuit breaker.
+	maxRetryAfter = 10 * time.Second
 )
+
+// logger writes the client's own diagnostics to stderr. It is not the
+// global log logger, because a host can bridge that logger into
+// SlogHandler, and a failed send would then become a new event.
+var logger = log.New(os.Stderr, "", log.LstdFlags)
 
 var defaultRetryDelays = []time.Duration{
 	1 * time.Second,
@@ -44,15 +53,14 @@ func zeroRetryDelays() {
 // SockeyeDSN is an alias for DSN kept for backwards compatibility.
 // With neither set, error reporting is off and Init returns no error.
 type Options struct {
-	DSN          string
-	SockeyeDSN   string
-	Environment  string
-	Release      string
-	ServerName   string
-	HTTPClient   *http.Client
-	SyncDispatch bool
-	InAppPrefix  string
-	Clock        func() time.Time
+	DSN         string
+	SockeyeDSN  string
+	Environment string
+	Release     string
+	ServerName  string
+	HTTPClient  *http.Client
+	InAppPrefix string
+	Clock       func() time.Time
 	// CaptureUsage says that the service sets Request.User on the
 	// requests it counts, such as every signed-in request. Each perf
 	// batch then carries the header Perf-Capture: usage, and sockeye
@@ -106,7 +114,6 @@ type client struct {
 	inAppPrefix  string
 	clock        func() time.Time
 	httpClient   *http.Client
-	syncDispatch bool
 	captureUsage bool
 
 	mu     sync.Mutex
@@ -182,15 +189,12 @@ func Init(opts Options) error {
 		inAppPrefix:  inAppPrefix,
 		clock:        opts.Clock,
 		httpClient:   hc,
-		syncDispatch: opts.SyncDispatch,
 		captureUsage: opts.CaptureUsage,
 		queue:        make(chan *event, queueLimit),
 		buckets:      map[string]*bucket{},
 	}
-	if !c.syncDispatch {
-		c.wg.Add(1)
-		go c.worker()
-	}
+	c.wg.Add(1)
+	go c.worker()
 	active.Store(c)
 	return nil
 }
@@ -234,10 +238,6 @@ func CaptureMessage(msg string, opts ...Option) string {
 }
 
 func (c *client) dispatch(e *event) {
-	if c.syncDispatch {
-		c.send(e)
-		return
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed.Load() {
@@ -275,13 +275,9 @@ func (c *client) flush(timeout time.Duration) {
 	if c.closed.Swap(true) {
 		return
 	}
-	if c.syncDispatch {
-		c.flushCounts(true)
-	} else {
-		c.mu.Lock()
-		close(c.queue)
-		c.mu.Unlock()
-	}
+	c.mu.Lock()
+	close(c.queue)
+	c.mu.Unlock()
 	perf := c.perf.Load()
 	if perf != nil {
 		perf.close()
@@ -321,7 +317,7 @@ func (c *client) deliver(name string, build func() (*http.Request, error)) bool 
 	for i, delay := range delays {
 		req, err := build()
 		if err != nil {
-			log.Printf("%s: build request: %v", name, err)
+			logger.Printf("%s: build request: %v", name, err)
 			return false
 		}
 
@@ -368,22 +364,25 @@ func (c *client) deliver(name string, build func() (*http.Request, error)) bool 
 		}
 
 		if resp.StatusCode/100 != 2 {
-			log.Printf("%s: send: HTTP %d (non-retriable)", name, resp.StatusCode)
+			logger.Printf("%s: send: HTTP %d (non-retriable)", name, resp.StatusCode)
 			return false
 		}
 		return true
 	}
 
 	if lastStatus != 0 {
-		log.Printf("%s: send: HTTP %d (exhausted)", name, lastStatus)
+		logger.Printf("%s: send: HTTP %d (exhausted)", name, lastStatus)
 	} else if lastErr != nil {
-		log.Printf("%s: send (exhausted): %v", name, lastErr)
+		logger.Printf("%s: send (exhausted): %v", name, lastErr)
 	} else {
-		log.Printf("%s: send: exhausted retries", name)
+		logger.Printf("%s: send: exhausted retries", name)
 	}
 	return false
 }
 
+// parseRetryAfter reads a Retry-After header in seconds, up to
+// maxRetryAfter. It compares the seconds before it multiplies, so no
+// value overflows time.Duration.
 func parseRetryAfter(h string) time.Duration {
 	if h == "" {
 		return 0
@@ -391,6 +390,9 @@ func parseRetryAfter(h string) time.Duration {
 	secs, err := strconv.Atoi(h)
 	if err != nil || secs <= 0 {
 		return 0
+	}
+	if secs >= int(maxRetryAfter/time.Second) {
+		return maxRetryAfter
 	}
 	return time.Duration(secs) * time.Second
 }

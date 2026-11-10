@@ -78,18 +78,18 @@ func TestCaptureExceptionSendsFrames(t *testing.T) {
 	defer srv.Close()
 
 	err := Init(Options{
-		DSN:          testDSN,
-		Environment:  "test",
-		Release:      "v1",
-		ServerName:   "test-host",
-		HTTPClient:   rewriteTransport(srv.URL),
-		SyncDispatch: true,
+		DSN:         testDSN,
+		Environment: "test",
+		Release:     "v1",
+		ServerName:  "test-host",
+		HTTPClient:  rewriteTransport(srv.URL),
 	})
 	is.NoErr(err)
 	defer Flush(time.Second)
 
 	err = Wrap(errors.New("kaboom"), "fetch positions")
 	CaptureException(err, WithTag("job", "worker.RefreshItem"))
+	Flush(time.Second)
 
 	reqs := srv.requests()
 	is.Eq(len(reqs), 1)
@@ -117,14 +117,14 @@ func TestCaptureExceptionFallsBackToCallerStack(t *testing.T) {
 	defer srv.Close()
 
 	err := Init(Options{
-		DSN:          testDSN,
-		HTTPClient:   rewriteTransport(srv.URL),
-		SyncDispatch: true,
+		DSN:        testDSN,
+		HTTPClient: rewriteTransport(srv.URL),
 	})
 	is.NoErr(err)
 	defer Flush(time.Second)
 
 	CaptureException(fmt.Errorf("plain"))
+	Flush(time.Second)
 
 	reqs := srv.requests()
 	is.Eq(len(reqs), 1)
@@ -142,15 +142,15 @@ func TestCaptureMessageHeadersAndShape(t *testing.T) {
 	defer srv.Close()
 
 	err := Init(Options{
-		DSN:          testDSN,
-		Environment:  "test",
-		HTTPClient:   rewriteTransport(srv.URL),
-		SyncDispatch: true,
+		DSN:         testDSN,
+		Environment: "test",
+		HTTPClient:  rewriteTransport(srv.URL),
 	})
 	is.NoErr(err)
 	defer Flush(time.Second)
 
 	CaptureMessage("hello world", WithExtra("k", "v"), WithFingerprint("a", "b"), WithLevel("warning"))
+	Flush(time.Second)
 
 	reqs := srv.requests()
 	is.Eq(len(reqs), 1)
@@ -184,13 +184,13 @@ func TestCaptureExceptionReturnsEmptyForNilError(t *testing.T) {
 	srv := newSockeyeServer(t)
 	defer srv.Close()
 	err := Init(Options{
-		DSN:          testDSN,
-		HTTPClient:   rewriteTransport(srv.URL),
-		SyncDispatch: true,
+		DSN:        testDSN,
+		HTTPClient: rewriteTransport(srv.URL),
 	})
 	is.NoErr(err)
 	defer Flush(time.Second)
 	got := CaptureException(nil)
+	Flush(time.Second)
 	is.Eq(got, "")
 	is.Eq(len(srv.requests()), 0)
 }
@@ -210,14 +210,14 @@ func TestSendRetriesTransientThenSucceeds(t *testing.T) {
 	defer srv.Close()
 
 	err := Init(Options{
-		DSN:          testDSN,
-		HTTPClient:   rewriteTransport(srv.URL),
-		SyncDispatch: true,
+		DSN:        testDSN,
+		HTTPClient: rewriteTransport(srv.URL),
 	})
 	is.NoErr(err)
 	defer Flush(time.Second)
 
 	CaptureMessage("retry me")
+	Flush(time.Second)
 
 	got := calls.Load()
 	is.Eq(got, int32(3))
@@ -239,14 +239,14 @@ func TestSendRetriesOn429(t *testing.T) {
 	defer srv.Close()
 
 	err := Init(Options{
-		DSN:          testDSN,
-		HTTPClient:   rewriteTransport(srv.URL),
-		SyncDispatch: true,
+		DSN:        testDSN,
+		HTTPClient: rewriteTransport(srv.URL),
 	})
 	is.NoErr(err)
 	defer Flush(time.Second)
 
 	CaptureMessage("rate limited")
+	Flush(time.Second)
 
 	got := calls.Load()
 	is.Eq(got, int32(2))
@@ -262,6 +262,9 @@ func TestParseRetryAfter(t *testing.T) {
 		{"0", 0},
 		{"-1", 0},
 		{"5", 5 * time.Second},
+		{"11", maxRetryAfter},
+		{"99999999999", maxRetryAfter},
+		{"99999999999999999999", 0},
 		{"Wed, 21 Oct 2026 07:28:00 GMT", 0},
 		{"abc", 0},
 	}
@@ -398,15 +401,15 @@ func TestClockOptionSetsTimestamps(t *testing.T) {
 
 	fixed := time.Date(2026, 10, 12, 14, 0, 0, 0, time.UTC)
 	err := Init(Options{
-		DSN:          testDSN,
-		Clock:        func() time.Time { return fixed },
-		HTTPClient:   rewriteTransport(srv.URL),
-		SyncDispatch: true,
+		DSN:        testDSN,
+		Clock:      func() time.Time { return fixed },
+		HTTPClient: rewriteTransport(srv.URL),
 	})
 	is.NoErr(err)
 	defer Flush(time.Second)
 
 	CaptureMessage("timed message")
+	Flush(time.Second)
 	ev := srv.firstEvent(t)
 	is.Eq(ev["timestamp"], "2026-10-12T14:00:00Z")
 }
@@ -418,15 +421,15 @@ func TestInAppPrefixOption(t *testing.T) {
 	defer srv.Close()
 
 	err := Init(Options{
-		DSN:          testDSN,
-		InAppPrefix:  "github.com/croaky/errs",
-		HTTPClient:   rewriteTransport(srv.URL),
-		SyncDispatch: true,
+		DSN:         testDSN,
+		InAppPrefix: "github.com/croaky/errs",
+		HTTPClient:  rewriteTransport(srv.URL),
 	})
 	is.NoErr(err)
 	defer Flush(time.Second)
 
 	CaptureException(errors.New("prefix test"))
+	Flush(time.Second)
 	ev := srv.firstEvent(t)
 	exc := ev["exception"].(map[string]any)
 	val := exc["values"].([]any)[0].(map[string]any)
@@ -440,11 +443,11 @@ func TestInAppPrefixOption(t *testing.T) {
 func TestInitReadsReleaseFromBuildInfo(t *testing.T) {
 	is := is.New(t)
 	resetActive(t)
-	is.NoErr(Init(Options{DSN: testDSN, SyncDispatch: true}))
+	is.NoErr(Init(Options{DSN: testDSN}))
 	defer Flush(time.Second)
 	is.Eq(active.Load().release, buildRevision())
 
 	resetActive(t)
-	is.NoErr(Init(Options{DSN: testDSN, Release: "v9", SyncDispatch: true}))
+	is.NoErr(Init(Options{DSN: testDSN, Release: "v9"}))
 	is.Eq(active.Load().release, "v9")
 }
