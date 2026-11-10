@@ -141,10 +141,39 @@ After a push, read the checks with `soc push --wait`.
 - Write the body as a change description. sockeye squashes a change into
   one commit whose message is the change's title and description. The
   first push of a branch with one commit copies the commit message to
-  the change.
+  the change, without the trailers the merge derives.
 - Sign your work with a `Co-Authored-By` trailer at the end of the
   message, after a blank line. A trailer on the line after the subject
   becomes part of the subject.
+
+## Trailers
+
+End the change description with one block of trailers, with no blank
+line between them. Keep each trailer on one line, even past 72
+columns.
+
+- `Requested-by: name, channel, thread or subject, date` records who
+  asked for the work, when somebody other than the author asked.
+- `Reported-by: Claude Security at claude.ai/security` credits a
+  finding from the Claude Security scanner.
+- `Fixes:` names each Claude Security finding the change fixes
+  (`Fixes: find_01... and find_02...`), or each production error group
+  (`Fixes: ERR-1F`). Do not write `Fixes: CWE-...`. A CWE names a
+  category, not a finding.
+- Do not type `Co-Authored-By`, `Reviewed-by`, or `Signed-off-by` in
+  the description. The merge derives them from the commits and the
+  comments.
+
+The squash merge writes the description to `main`, not the commit
+messages. The first push of a branch with one commit copies its
+trailers to the description, except the ones the merge derives. A
+later `soc edit` writes only what it reads, so keep the trailers in
+it:
+
+    git --no-pager log -1 --format=%B | sed '/^Co-Authored-By:/d' | soc edit
+
+Before the merge, read the description in `soc show` and confirm that
+it ends with the trailers.
 
 ## Releases
 
