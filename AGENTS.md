@@ -98,6 +98,29 @@ dprint fmt
 `dprint check`. Fix formatting in the change, since a CI job that
 rewrites a file has nowhere to put changes.
 
+## Capture boundaries
+
+A capture call must own every byte the worker reads after return.
+Test caller mutation after return for queued and sampled events. Run
+those tests with the race detector. Never send a caller's mutable map
+to the worker as an optimization.
+
+State each bound in bytes, items, time, or work. A bounded queue does
+not bound memory when its items are unbounded. Cutting encoded JSON
+bounds the wire value, not the memory or time spent encoding it. Treat
+custom marshal and formatting methods as host code on the caller path.
+Test a limit, an input past it, and a valid value that must remain.
+
+Redaction has more than one path. Resolve LogValuer before capture and
+test nested groups. The wrapped handler's ReplaceAttr does not apply
+to events. Never claim that it does. Diagnostic errors must not repeat
+a DSN or another credential. Build endpoints from parsed URL fields.
+
+Measure normal, sampled-out, and oversized capture separately. Compare
+time, bytes, and allocations with repeated runs on one toolchain. Keep
+small ownership and boundary regressions on each push. Longer fuzz and
+benchmark runs need bounds, retained failure inputs, and an owner.
+
 ## Tests
 
 Use red/green TDD where possible.
