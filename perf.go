@@ -223,10 +223,8 @@ func (c *client) perfSender() *perfSender {
 			return
 		}
 		s := &perfSender{
-			c: c,
-			// The DSN names /errors/<repo>/<service>, and the same
-			// key posts to /perf/<repo>/<service>.
-			endpoint: strings.Replace(c.dsn.endpoint, "/errors/", "/perf/", 1),
+			c:        c,
+			endpoint: c.dsn.perfEndpoint,
 			queue:    make(chan perfRecord, perfQueue),
 			done:     make(chan struct{}),
 		}

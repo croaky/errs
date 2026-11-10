@@ -81,6 +81,7 @@ err := errs.Init(errs.Options{
 
 `Release` is the commit sha that runs. sockeye matches it to a deploy.
 An invalid DSN makes `Init` return an error that names the expected form.
+The error does not quote the DSN, so a log of it does not show the key.
 
 Tag an event with its request, so sockeye links it to the log lines of
 that request:
@@ -105,7 +106,9 @@ The sockeye path protects both ends of the connection:
 ## Request metrics
 
 `RecordRequest` sends one served request to sockeye's perf page, with
-the key in the same DSN. Call it where the service logs a request:
+the key in the same DSN. It posts to `/perf/<repo>/<service>` on the
+scheme, host, and port of the DSN. Call it where the service logs a
+request:
 
 ```go
 errs.RecordRequest(errs.Request{

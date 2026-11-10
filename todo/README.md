@@ -20,12 +20,10 @@ before a leak of a low-value key.
    `LogValuer` values.
 3. `003-bound-perf-record-fields.md`: put a byte limit on `Route`,
    `Pattern`, and the `perfExtra` notes.
-4. `004-dsn-endpoints-and-errors.md`: build the perf endpoint from the
-   parsed DSN, and keep the key out of the `parseDSN` error.
 
 Plans `001` and `002` both edit `errs.go` and `sockeye.go`. Do them in
-one queue, `001` first. Plans `003` and `004` touch other code and can
-go in parallel.
+one queue, `001` first. Plan `003` touches other code and can go in
+parallel.
 
 ## Security findings
 
@@ -56,10 +54,6 @@ consequence, and the boundary.
 - `find_01SPoaitRjRALBfBdHoKjk2T` (medium, perf `Route` limit): `003`.
 - `find_01R33icG43Zji1zZ67VDisKE` (medium, `perfExtra` note size):
   `003`.
-- `find_01LbYCXgohbWFTBMDu5PWR54` (low, perf endpoint host rewrite):
-  `004`.
-- `find_01CoHHRzTo6pUmxG1MuvM9nd` (low, DSN key in the `Init` error):
-  `004`.
 
 ## Threat model
 
