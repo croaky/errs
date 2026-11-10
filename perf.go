@@ -136,8 +136,9 @@ type perfRecord struct {
 
 // perfRoute returns the route as sockeye takes it: with no query
 // string, "/" when empty, and perfRouteLong when past perfRouteMax
-// bytes. The cut is a copy, so a queued record does not hold the
-// caller's string.
+// bytes. It returns a copy or a constant, so a queued record does not
+// hold the caller's string. A short r.URL.Path shares the memory of
+// the whole request line.
 func perfRoute(route string) string {
 	i := strings.IndexByte(route, '?')
 	if i < 0 {
@@ -148,18 +149,16 @@ func perfRoute(route string) string {
 		return "/"
 	case i > perfRouteMax:
 		return perfRouteLong
-	case i < len(route):
-		return strings.Clone(route[:i])
 	}
-	return route
+	return strings.Clone(route[:i])
 }
 
-// perfCut returns s cut to n bytes, with no split rune at the end.
-// The cut is a copy, so a queued record does not hold the caller's
-// string.
+// perfCut returns a copy of s cut to n bytes, with no split rune at
+// the end. It copies a short s too, so a queued record does not hold
+// the caller's larger string.
 func perfCut(s string, n int) string {
 	if len(s) <= n {
-		return s
+		return strings.Clone(s)
 	}
 	return strings.Clone(strings.ToValidUTF8(s[:n], ""))
 }
@@ -174,13 +173,32 @@ func perfUser(u string) string {
 }
 
 // perfMethod returns the method in uppercase, or "" when it is not
-// one to sixteen letters.
+// one to sixteen letters. It returns a constant for a standard method
+// and a copy for any other, so a queued record does not hold the
+// caller's string. r.Method shares the memory of the whole request
+// line.
 func perfMethod(m string) string {
 	m = strings.ToUpper(m)
 	if len(m) > perfMethodMax || strings.ContainsFunc(m, func(c rune) bool { return c < 'A' || c > 'Z' }) {
 		return ""
 	}
-	return m
+	switch m {
+	case http.MethodGet:
+		return http.MethodGet
+	case http.MethodPost:
+		return http.MethodPost
+	case http.MethodPut:
+		return http.MethodPut
+	case http.MethodPatch:
+		return http.MethodPatch
+	case http.MethodDelete:
+		return http.MethodDelete
+	case http.MethodHead:
+		return http.MethodHead
+	case http.MethodOptions:
+		return http.MethodOptions
+	}
+	return strings.Clone(m)
 }
 
 // perfExtra encodes extra as sockeye takes it. An extra that breaks a
@@ -347,14 +365,21 @@ func (s *perfSender) run() {
 			}
 			batch = append(batch, r)
 			if len(batch) == perfBatchMax {
-				s.send(batch)
-				batch = batch[:0]
+				batch = s.sendBatch(batch)
 			}
 		case <-t.C:
-			s.send(batch)
-			batch = batch[:0]
+			batch = s.sendBatch(batch)
 		}
 	}
+}
+
+// sendBatch sends batch and returns it empty, for the next batch. It
+// clears each record first, so the buffer does not keep the strings
+// and the Extra of sent records in memory.
+func (s *perfSender) sendBatch(batch []perfRecord) []perfRecord {
+	s.send(batch)
+	clear(batch)
+	return batch[:0]
 }
 
 // send posts one batch. It encodes the body once, with its drop count,

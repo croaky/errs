@@ -1,6 +1,7 @@
 package errs
 
 import (
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
 	"io"
@@ -412,6 +413,49 @@ func TestPerfRecordCopiesCutFields(t *testing.T) {
 	is.True(!shares(r.Route, route))
 	is.True(!shares(r.Pattern, big))
 	is.True(!shares(r.User, big))
+}
+
+// TestPerfRecordCopiesShortFields: a field within its limit that is a
+// substring of a long request line, as r.Method and r.URL.Path are, does
+// not keep that line in memory while the record waits in the queue.
+func TestPerfRecordCopiesShortFields(t *testing.T) {
+	is := is.New(t)
+	s := &perfSender{c: &client{}, queue: make(chan perfRecord, 1)}
+	line := "GET /companies/show?q=" + strings.Repeat("a", 1<<20) + " HTTP/1.1 PATCH 1742 GET /companies/{id}"
+	sub := func(s string) string {
+		i := strings.Index(line, s)
+		return line[i : i+len(s)]
+	}
+	for _, method := range []string{sub("GET"), sub("PATCH")} {
+		s.add(Request{Route: sub("/companies/show"), Pattern: sub("GET /companies/{id}"),
+			User: sub("1742"), Method: method, Status: 200, Time: time.Now()})
+		r := <-s.queue
+		is.Eq(r.Route, "/companies/show")
+		is.Eq(r.Pattern, "GET /companies/{id}")
+		is.Eq(r.User, "1742")
+		is.Eq(r.Method, method)
+		for _, f := range []string{r.Route, r.Pattern, r.User, r.Method} {
+			is.True(!shares(f, line))
+		}
+	}
+}
+
+// TestPerfSendClearsBatch: after the sender sends or drops a batch, its
+// batch buffer holds no record, so a sent record can be freed.
+func TestPerfSendClearsBatch(t *testing.T) {
+	is := is.New(t)
+	s := &perfSender{c: &client{}, openUntil: time.Now().Add(time.Hour)} // drop, do not post
+	batch := make([]perfRecord, 0, perfBatchMax)
+	for range perfBatchMax {
+		batch = append(batch, perfRecord{Route: "/r", Extra: jsontext.Value(`{"q":1}`)})
+	}
+	batch = s.sendBatch(batch)
+	is.Eq(len(batch), 0)
+	for _, r := range batch[:cap(batch)] {
+		is.Eq(r.Route, "")
+		is.Nil(r.Extra)
+	}
+	is.Eq(s.dropped.Load(), int64(perfBatchMax))
 }
 
 // shares reports whether part points into whole's bytes.

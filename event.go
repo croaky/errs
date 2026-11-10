@@ -96,11 +96,13 @@ func (c *client) newEvent(level string, opts []Option) *event {
 // truncate trims string s to maxMessageBytes bytes at a rune boundary.
 func truncate(s string) string { return cut(s, maxMessageBytes) }
 
-// cut trims s to n bytes at a rune boundary. It returns a copy of a
-// cut string, so the result does not keep the long string in memory.
+// cut trims s to n bytes at a rune boundary. It returns a copy, also
+// of a short s, so the result does not keep a longer string in memory.
+// A short s can be a substring of a long string, such as r.Method of
+// the request line.
 func cut(s string, n int) string {
 	if len(s) <= n {
-		return s
+		return strings.Clone(s)
 	}
 	end := n
 	for end > 0 && !isRuneStart(s[end]) {

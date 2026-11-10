@@ -199,6 +199,9 @@ The request path protects both ends of the connection too:
 
 - `RecordRequest` never blocks. It queues up to 5,000 records, and
   drops a record past that.
+- `RecordRequest` copies each string it keeps. A queued record holds
+  only the bytes it sends, not the request line that `r.Method` and
+  `r.URL.Path` come from.
 - A sender of its own posts a batch at 50 records, and every 10 seconds
   whatever it has. A quiet interval posts an empty batch, so sockeye
   reads it as quiet and not as missing. The sender starts on the first

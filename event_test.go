@@ -123,6 +123,28 @@ func TestCutHoldsNoReferenceToTheLongString(t *testing.T) {
 	is.Eq(truncate("short"), "short")
 }
 
+// TestEventCopiesShortStrings: a tag, a fingerprint part, a level, or a
+// message within its limit that is a substring of a long string does
+// not keep that string in memory while the event waits.
+func TestEventCopiesShortStrings(t *testing.T) {
+	is := is.New(t)
+	line := "GET /companies/show?q=" + strings.Repeat("a", 1<<20) + " HTTP/1.1"
+	method, path := line[:3], line[4:19]
+	c := &client{}
+	e := c.newEvent("info", []Option{WithTag(method, path), WithFingerprint(method, path), WithLevel(method)})
+	e.Message = truncate(path)
+	is.Eq(e.Tags["GET"], "/companies/show")
+	for k, v := range e.Tags {
+		is.True(!shares(k, line) && !shares(v, line))
+	}
+	is.Eq(e.Fingerprint, []string{"GET", "/companies/show"})
+	for _, p := range e.Fingerprint {
+		is.True(!shares(p, line))
+	}
+	is.True(!shares(e.Level, line))
+	is.True(!shares(e.Message, line))
+}
+
 // TestBucketHoldsNoEventAfterItsCount: after send or flushCounts posts
 // the count of a bucket, the bucket holds no event.
 func TestBucketHoldsNoEventAfterItsCount(t *testing.T) {
