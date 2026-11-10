@@ -3,6 +3,7 @@ package errs
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json/jsontext"
 	"fmt"
 	"io"
 	"log"
@@ -71,38 +72,58 @@ type Options struct {
 // Option modifies an outgoing event.
 type Option func(*event)
 
-// WithTag attaches a key-value tag to the event.
+// WithTag attaches a key-value tag to the event. An event keeps its
+// first maxTags tags. The client cuts a key past maxKeyBytes and a
+// value past maxTagBytes.
 func WithTag(key, value string) Option {
 	return func(e *event) {
+		k := cut(key, maxKeyBytes)
+		if _, ok := e.Tags[k]; !ok && len(e.Tags) >= maxTags {
+			return
+		}
 		if e.Tags == nil {
 			e.Tags = map[string]string{}
 		}
-		e.Tags[key] = value
+		e.Tags[k] = cut(value, maxTagBytes)
 	}
 }
 
-// WithExtra attaches structured metadata to the event.
+// WithExtra attaches structured metadata to the event. The capture
+// call encodes value as JSON before it returns, so the caller can
+// change value afterward. An event keeps its first maxExtras extras.
+// See encodeExtra for a value that is too large or does not encode.
 func WithExtra(key string, value any) Option {
 	return func(e *event) {
-		if e.Extra == nil {
-			e.Extra = map[string]any{}
+		k := cut(key, maxKeyBytes)
+		if _, ok := e.Extra[k]; !ok && len(e.Extra) >= maxExtras {
+			return
 		}
-		e.Extra[key] = value
+		if e.Extra == nil {
+			e.Extra = map[string]jsontext.Value{}
+		}
+		e.Extra[k] = encodeExtra(value)
 	}
 }
 
-// WithFingerprint overrides event grouping.
+// WithFingerprint overrides event grouping. The event keeps a copy of
+// the first maxFingerprintParts parts, each cut to maxFingerprintBytes.
 func WithFingerprint(parts ...string) Option {
-	return func(e *event) { e.Fingerprint = parts }
+	return func(e *event) {
+		n := min(len(parts), maxFingerprintParts)
+		e.Fingerprint = make([]string, n)
+		for i, p := range parts[:n] {
+			e.Fingerprint[i] = cut(p, maxFingerprintBytes)
+		}
+	}
 }
 
 // WithRequestID tags the event with the request that caused it.
 // sockeye links the event to the log lines of that request.
 func WithRequestID(id string) Option { return WithTag("request_id", id) }
 
-// WithLevel sets the event level.
+// WithLevel sets the event level, cut to maxLevelBytes.
 func WithLevel(level string) Option {
-	return func(e *event) { e.Level = level }
+	return func(e *event) { e.Level = cut(level, maxLevelBytes) }
 }
 
 type client struct {

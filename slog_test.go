@@ -2,6 +2,7 @@ package errs
 
 import (
 	"bytes"
+	"encoding/json/v2"
 	"errors"
 	"io"
 	"log"
@@ -127,6 +128,36 @@ func TestSendFailureDoesNotReenterSlog(t *testing.T) {
 		msgs = append(msgs, r.ev["message"])
 	}
 	is.Eq(msgs, []any{"first", "after"})
+}
+
+type secret string
+
+func (secret) LogValue() slog.Value { return slog.StringValue("REDACTED") }
+
+// TestSlogHandlerResolvesLogValuer: an attribute whose LogValue returns
+// a placeholder shows only the placeholder in the event, at the top
+// level, in a group, and under the err key.
+func TestSlogHandlerResolvesLogValuer(t *testing.T) {
+	is := is.New(t)
+	cs := slogTestClient(t)
+	log := slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil)))
+
+	log.Error("login failed",
+		"token", secret("hunter2"),
+		slog.Group("user", "password", secret("hunter2")),
+		"err", secret("hunter2"),
+	)
+	Flush(time.Second)
+
+	reqs := cs.requests()
+	is.Eq(len(reqs), 1)
+	body, err := json.Marshal(reqs[0].ev)
+	is.NoErr(err)
+	is.True(!strings.Contains(string(body), "hunter2"))
+	extra := reqs[0].ev["extra"].(map[string]any)
+	is.Eq(extra["token"], "REDACTED")
+	is.Eq(extra["user"], "[password=REDACTED]")
+	is.Eq(extra["err"], "REDACTED")
 }
 
 func TestSlogHandlerWithoutClientOnlyLogs(t *testing.T) {

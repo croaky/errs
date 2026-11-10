@@ -1,7 +1,10 @@
 package errs
 
 import (
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"reflect"
 	"runtime"
 	"strings"
@@ -13,21 +16,36 @@ var stackErrType = reflect.TypeFor[*stackErr]()
 
 // event represents an error or message event payload.
 type event struct {
-	EventID     string            `json:"event_id"`
-	Timestamp   string            `json:"timestamp"`
-	Platform    string            `json:"platform"`
-	Level       string            `json:"level"`
-	Environment string            `json:"environment,omitempty"`
-	Release     string            `json:"release,omitempty"`
-	ServerName  string            `json:"server_name,omitempty"`
-	SDK         sdkInfo           `json:"sdk"`
-	Tags        map[string]string `json:"tags,omitempty"`
-	Extra       map[string]any    `json:"extra,omitempty"`
-	Fingerprint []string          `json:"fingerprint,omitempty"`
-	Message     string            `json:"message,omitempty"`
-	Count       int               `json:"count,omitzero"`
-	Exception   *exceptionPayload `json:"exception,omitempty"`
+	EventID     string                    `json:"event_id"`
+	Timestamp   string                    `json:"timestamp"`
+	Platform    string                    `json:"platform"`
+	Level       string                    `json:"level"`
+	Environment string                    `json:"environment,omitempty"`
+	Release     string                    `json:"release,omitempty"`
+	ServerName  string                    `json:"server_name,omitempty"`
+	SDK         sdkInfo                   `json:"sdk"`
+	Tags        map[string]string         `json:"tags,omitempty"`
+	Extra       map[string]jsontext.Value `json:"extra,omitempty"`
+	Fingerprint []string                  `json:"fingerprint,omitempty"`
+	Message     string                    `json:"message,omitempty"`
+	Count       int                       `json:"count,omitzero"`
+	Exception   *exceptionPayload         `json:"exception,omitempty"`
 }
+
+// The limits on the caller text in one event. With the message and
+// exception limits and a 64-frame stack, they keep an encoded event
+// under about 200 KiB. The fingerprint limits also bound the sampling
+// key of fingerprintKey.
+const (
+	maxTags             = 50
+	maxExtras           = 50
+	maxFingerprintParts = 10
+	maxKeyBytes         = 64
+	maxTagBytes         = 1 << 10
+	maxExtraBytes       = 2 << 10
+	maxFingerprintBytes = 256
+	maxLevelBytes       = 16
+)
 
 type sdkInfo struct {
 	Name    string `json:"name"`
@@ -76,15 +94,45 @@ func (c *client) newEvent(level string, opts []Option) *event {
 }
 
 // truncate trims string s to maxMessageBytes bytes at a rune boundary.
-func truncate(s string) string {
-	if len(s) <= maxMessageBytes {
+func truncate(s string) string { return cut(s, maxMessageBytes) }
+
+// cut trims s to n bytes at a rune boundary. It returns a copy of a
+// cut string, so the result does not keep the long string in memory.
+func cut(s string, n int) string {
+	if len(s) <= n {
 		return s
 	}
-	end := maxMessageBytes
+	end := n
 	for end > 0 && !isRuneStart(s[end]) {
 		end--
 	}
-	return s[:end]
+	return strings.Clone(s[:end])
+}
+
+// encodeExtra encodes one extra value as JSON on the caller goroutine,
+// so the worker reads no memory the caller can still change. A value
+// that JSON cannot encode, such as an error, a channel, or a NaN, goes
+// as its fmt.Sprint text. A value whose encoding is past maxExtraBytes,
+// or whose marshal method panics, goes as a short note.
+func encodeExtra(v any) (out jsontext.Value) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = noteValue("extra value panicked while it encoded")
+		}
+	}()
+	b, err := json.Marshal(v, wireJSON)
+	if err != nil {
+		b, _ = json.Marshal(cut(fmt.Sprint(v), maxExtraBytes-64), wireJSON)
+	}
+	if len(b) > maxExtraBytes {
+		return noteValue(fmt.Sprintf("extra was %d bytes; the limit is %d", len(b), maxExtraBytes))
+	}
+	return b
+}
+
+func noteValue(s string) jsontext.Value {
+	b, _ := json.Marshal(s)
+	return b
 }
 
 func isRuneStart(b byte) bool { return b&0xC0 != 0x80 }

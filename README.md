@@ -36,6 +36,11 @@ call still writes its log line:
 slog.SetDefault(slog.New(errs.SlogHandler(slog.Default().Handler())))
 ```
 
+The handler sends the record attributes as extras. It resolves each
+`slog.LogValuer` first, so a type that redacts itself in logs is
+redacted in events too. The `ReplaceAttr` function of the wrapped
+handler does not apply to events.
+
 An empty `Release` reads the commit from the Go build info.
 
 Wrap errors to record caller stack traces:
@@ -102,6 +107,13 @@ The sockeye path protects both ends of the connection:
 - The client counts events it discards: a full queue, an open
   breaker, and a send that fails after its retries. The next event
   that reaches sockeye carries the number as `extra.dropped`.
+- Each event has a size limit. An event keeps its first 50 tags and
+  50 extras, and its first 10 fingerprint parts. The client cuts a
+  key past 64 bytes, a tag value past 1 KiB, a fingerprint part past
+  256 bytes, and a message or error text past 8 KiB. An extra whose
+  JSON is past 2 KiB becomes a note that gives its size.
+- The capture call encodes each extra before it returns, so the caller
+  can change a map or a slice after it passes it to `WithExtra`.
 
 ## Request metrics
 

@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
-	"fmt"
 	"maps"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -46,20 +46,6 @@ var wireJSON = json.JoinOptions(
 		return enc.WriteToken(jsontext.Int(int64(d)))
 	})),
 )
-
-// printExtra returns extra with each value that JSON cannot encode,
-// such as an error, a channel, or a NaN, replaced by its fmt.Sprint
-// text, so one value does not drop the event.
-func printExtra(extra map[string]any) map[string]any {
-	out := make(map[string]any, len(extra))
-	for k, v := range extra {
-		if _, err := json.Marshal(v, wireJSON); err != nil {
-			v = fmt.Sprint(v)
-		}
-		out[k] = v
-	}
-	return out
-}
 
 func breakerPause(failures int) time.Duration {
 	idx := failures - breakerFailures
@@ -108,7 +94,7 @@ func (c *client) send(e *event) {
 			c.breakerMu.Unlock()
 			return
 		}
-		count, bk.held, bk.lastCount = bk.held, 0, now
+		count, bk.held, bk.lastCount, bk.last = bk.held, 0, now, nil
 	}
 	c.breakerMu.Unlock()
 
@@ -130,7 +116,7 @@ func (c *client) flushCounts(all bool) {
 	for key, bk := range c.buckets {
 		if bk.held > 0 && (all || now.Sub(bk.lastCount) >= countEvery) {
 			due = append(due, pending{bk.last, bk.held})
-			bk.held, bk.lastCount = 0, now
+			bk.held, bk.lastCount, bk.last = 0, now, nil
 		}
 		if bk.held == 0 && now.Sub(bk.windowStart) >= sampleWindow && now.Sub(bk.lastCount) >= sampleWindow {
 			delete(c.buckets, key)
@@ -158,15 +144,11 @@ func (c *client) post(e *event, count int) {
 	if dropped > 0 {
 		e.Extra = maps.Clone(e.Extra)
 		if e.Extra == nil {
-			e.Extra = map[string]any{}
+			e.Extra = map[string]jsontext.Value{}
 		}
-		e.Extra["dropped"] = dropped
+		e.Extra["dropped"] = jsontext.Value(strconv.FormatInt(dropped, 10))
 	}
 	body, err := json.Marshal(e, wireJSON)
-	if err != nil && e.Extra != nil {
-		e.Extra = printExtra(e.Extra)
-		body, err = json.Marshal(e, wireJSON)
-	}
 	if err != nil {
 		c.dropped.Add(dropped + int64(lost))
 		return

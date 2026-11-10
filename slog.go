@@ -2,8 +2,8 @@ package errs
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
+	"strings"
 )
 
 // SlogHandler wraps next. Every record goes to next as before. Each
@@ -13,8 +13,10 @@ import (
 // A record whose "err" attribute holds an error is sent as an
 // exception, wrapped with the record message. Any other record is sent
 // as a message. The record message becomes the "log" tag, and the other
-// attributes become extras. With no client started, the handler only
-// calls next.
+// attributes become extras. The handler resolves each slog.LogValuer
+// first, so an event shows what LogValue returns. The ReplaceAttr
+// function of next does not apply to events. With no client started,
+// the handler only calls next.
 func SlogHandler(next slog.Handler) slog.Handler {
 	return slogHandler{next}
 }
@@ -40,11 +42,12 @@ func captureRecord(r slog.Record) {
 	var cause error
 	opts := []Option{WithTag("log", r.Message)}
 	r.Attrs(func(a slog.Attr) bool {
-		if e, ok := a.Value.Any().(error); ok && a.Key == "err" {
+		v := a.Value.Resolve()
+		if e, ok := v.Any().(error); ok && a.Key == "err" {
 			cause = e
 			return true
 		}
-		opts = append(opts, WithExtra(a.Key, fmt.Sprint(a.Value.Any())))
+		opts = append(opts, WithExtra(a.Key, attrText(v)))
 		return true
 	})
 	if cause != nil {
@@ -52,4 +55,19 @@ func captureRecord(r slog.Record) {
 		return
 	}
 	CaptureMessage(r.Message, opts...)
+}
+
+// attrText formats a slog value for an extra. It resolves each
+// slog.LogValuer, in a group too. Value.Resolve stops a LogValue that
+// panics or loops.
+func attrText(v slog.Value) string {
+	v = v.Resolve()
+	if v.Kind() != slog.KindGroup {
+		return v.String()
+	}
+	parts := make([]string, 0, len(v.Group()))
+	for _, a := range v.Group() {
+		parts = append(parts, a.Key+"="+attrText(a.Value))
+	}
+	return "[" + strings.Join(parts, " ") + "]"
 }
