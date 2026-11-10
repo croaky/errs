@@ -20,10 +20,12 @@ import (
 type Request struct {
 	// Route names the page, with no query string and no ids:
 	// "/companies/show", not "/companies/show?id=42". RecordRequest
-	// removes a query string in all cases.
+	// removes a query string in all cases. It sends a route past 256
+	// bytes as "/{long}", the label sockeye gives such a route.
 	Route string
 	// Pattern is the matched http.Request.Pattern, when the router supplies it.
 	// It stays exact, including method, host and wildcard names.
+	// RecordRequest cuts a pattern past 256 bytes.
 	Pattern string
 	Status  int
 	// Duration is the whole request. DB is the time its queries took,
@@ -63,9 +65,12 @@ type Request struct {
 }
 
 const (
-	perfUserMax   = 64
-	perfMethodMax = 16
-	perfExtraMax  = 2 << 10 // 2 KiB, sockeye's limit
+	perfRouteMax   = 256 // sockeye's limit; it labels a longer route perfRouteLong
+	perfRouteLong  = "/{long}"
+	perfPatternMax = 256
+	perfUserMax    = 64
+	perfMethodMax  = 16
+	perfExtraMax   = 2 << 10 // 2 KiB, sockeye's limit
 )
 
 // perfExtraKey is the form sockeye takes for an Extra key.
@@ -117,16 +122,43 @@ type perfRecord struct {
 	Extra       jsontext.Value `json:"extra,omitzero"`
 }
 
+// perfRoute returns the route as sockeye takes it: with no query
+// string, "/" when empty, and perfRouteLong when past perfRouteMax
+// bytes. The cut is a copy, so a queued record does not hold the
+// caller's string.
+func perfRoute(route string) string {
+	i := strings.IndexByte(route, '?')
+	if i < 0 {
+		i = len(route)
+	}
+	switch {
+	case i == 0:
+		return "/"
+	case i > perfRouteMax:
+		return perfRouteLong
+	case i < len(route):
+		return strings.Clone(route[:i])
+	}
+	return route
+}
+
+// perfCut returns s cut to n bytes, with no split rune at the end.
+// The cut is a copy, so a queued record does not hold the caller's
+// string.
+func perfCut(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return strings.Clone(strings.ToValidUTF8(s[:n], ""))
+}
+
 // perfUser returns the user as sockeye takes it: cut to perfUserMax
 // bytes, or "" when it holds a control character.
 func perfUser(u string) string {
 	if strings.ContainsAny(u, "\r\n\x00") {
 		return ""
 	}
-	if len(u) > perfUserMax {
-		u = strings.ToValidUTF8(u[:perfUserMax], "")
-	}
-	return u
+	return perfCut(u, perfUserMax)
 }
 
 // perfMethod returns the method in uppercase, or "" when it is not
@@ -141,21 +173,21 @@ func perfMethod(m string) string {
 
 // perfExtra encodes extra as sockeye takes it. An extra that breaks a
 // limit becomes a note that says which, since sockeye refuses the
-// whole batch for one bad record.
+// whole batch for one bad record. Each note has a fixed size and holds
+// no caller text, so a note never breaks the limit itself.
 func perfExtra(extra map[string]any) jsontext.Value {
 	if extra == nil {
 		return nil
 	}
 	for k := range extra {
 		if !perfExtraKey.MatchString(k) {
-			b, _ := json.Marshal(map[string]string{"invalid": fmt.Sprintf("extra key %q must match [a-z0-9_] and be at most 64 bytes", k)})
-			return b
+			return jsontext.Value(`{"invalid":"extra keys must match [a-z0-9_] and be at most 64 bytes"}`)
 		}
 	}
 	b, err := json.Marshal(extra, wireJSON)
 	switch {
 	case err != nil:
-		b, _ = json.Marshal(map[string]string{"invalid": "extra is not valid JSON: " + err.Error()})
+		return jsontext.Value(`{"invalid":"extra does not encode as JSON"}`)
 	case len(b) > perfExtraMax:
 		b, _ = json.Marshal(map[string]string{"truncated": fmt.Sprintf("extra was %d bytes; the limit is %d", len(b), perfExtraMax)})
 	}
@@ -234,20 +266,13 @@ func (c *client) perfSender() *perfSender {
 }
 
 func (s *perfSender) add(r Request) {
-	route := r.Route
-	if i := strings.IndexByte(route, '?'); i >= 0 {
-		route = route[:i]
-	}
-	if route == "" {
-		route = "/"
-	}
 	at := r.Time
 	if at.IsZero() {
 		at = s.c.now()
 	}
 	rec := perfRecord{
-		Route:      route,
-		Pattern:    r.Pattern,
+		Route:      perfRoute(r.Route),
+		Pattern:    perfCut(r.Pattern, perfPatternMax),
 		Status:     r.Status,
 		DurationMs: ms(r.Duration),
 		Time:       at.UTC(),

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/croaky/is"
 )
@@ -214,7 +215,7 @@ func TestRecordRequestDetail(t *testing.T) {
 		}
 	}
 	is.Eq(recs[2]["extra"], map[string]any{"truncated": fmt.Sprintf("extra was %d bytes; the limit is %d", perfExtraMax+8, perfExtraMax)})
-	is.Eq(recs[3]["extra"], map[string]any{"invalid": `extra key "Bad-Key" must match [a-z0-9_] and be at most 64 bytes`})
+	is.Eq(recs[3]["extra"], map[string]any{"invalid": "extra keys must match [a-z0-9_] and be at most 64 bytes"})
 	is.Eq(len(recs[4]["user"].(string)), perfUserMax)
 	_, hasMethod := recs[4]["method"]
 	is.True(!hasMethod)
@@ -347,7 +348,7 @@ func TestMatchedPatternPreserved(t *testing.T) {
 // TestRecordRequestExtraEncoding: a perf record with invalid UTF-8
 // still sends, with U+FFFD in place of each bad byte, and a
 // time.Duration in Extra goes as integer nanoseconds. An Extra that
-// JSON cannot encode becomes an invalid note that quotes the error.
+// JSON cannot encode becomes an invalid note with no error text.
 func TestRecordRequestExtraEncoding(t *testing.T) {
 	is := is.New(t)
 	srv := newPerfServer(t)
@@ -365,5 +366,78 @@ func TestRecordRequestExtraEncoding(t *testing.T) {
 	is.Eq(recs[0]["route"], "/u\uFFFD")
 	is.Eq(recs[0]["user"], "u\uFFFD")
 	is.Eq(recs[0]["extra"], map[string]any{"q": "a\uFFFDb", "took": 2e9})
-	is.Eq(recs[1]["extra"], map[string]any{"invalid": `extra is not valid JSON: json: cannot marshal from Go chan int within "/ch"`})
+	is.Eq(recs[1]["extra"], map[string]any{"invalid": "extra does not encode as JSON"})
+}
+
+// TestRecordRequestLongFields: a 1 MB Route and a 1 MB Pattern give a
+// record under 1 KiB, and its batch posts with the other records. A
+// long route goes as /{long}, the label sockeye gives it, and a long
+// pattern goes cut to perfPatternMax bytes.
+func TestRecordRequestLongFields(t *testing.T) {
+	is := is.New(t)
+	srv := newPerfServer(t)
+	initPerf(t, srv)
+
+	big := "/" + strings.Repeat("a", 1<<20)
+	RecordRequest(Request{Route: "/before", Status: 200})
+	RecordRequest(Request{Route: big + "?q=1", Pattern: "GET " + big, Status: 200})
+	RecordRequest(Request{Route: "/" + strings.Repeat("b", perfRouteMax-1), Status: 200})
+	RecordRequest(Request{Route: "/after", Status: 200})
+	Flush(time.Second)
+
+	posts := srv.received()
+	is.Eq(len(posts), 1)
+	is.True(len(posts[0].body) < 2<<10)
+	recs := posts[0].records
+	is.Eq(len(recs), 4)
+	is.Eq(recs[0]["route"], "/before")
+	is.Eq(recs[1]["route"], "/{long}")
+	is.Eq(recs[1]["pattern"], "GET "+big[:perfPatternMax-4])
+	is.Eq(len(recs[2]["route"].(string)), perfRouteMax)
+	is.Eq(recs[3]["route"], "/after")
+}
+
+// TestPerfRecordCopiesCutFields: a queued record does not hold the
+// caller's large string, so 5,000 queued records hold only the bytes
+// they send.
+func TestPerfRecordCopiesCutFields(t *testing.T) {
+	is := is.New(t)
+	s := &perfSender{c: &client{}, queue: make(chan perfRecord, 1)}
+	big := "/" + strings.Repeat("a", 1<<20)
+	route := "/r?" + big
+	s.add(Request{Route: route, Pattern: big, User: big, Status: 200, Time: time.Now()})
+	r := <-s.queue
+	is.Eq(r.Route, "/r")
+	is.True(!shares(r.Route, route))
+	is.True(!shares(r.Pattern, big))
+	is.True(!shares(r.User, big))
+}
+
+// shares reports whether part points into whole's bytes.
+func shares(part, whole string) bool {
+	if part == "" {
+		return false
+	}
+	p := uintptr(unsafe.Pointer(unsafe.StringData(part)))
+	w := uintptr(unsafe.Pointer(unsafe.StringData(whole)))
+	return p >= w && p < w+uintptr(len(whole))
+}
+
+// TestPerfExtraNoteSize: the note for a bad key or an encode error is
+// at most perfExtraMax bytes, for a long key printable or not, and for
+// a long encode error.
+func TestPerfExtraNoteSize(t *testing.T) {
+	is := is.New(t)
+	long := strings.Repeat("K", 8<<10)
+	for _, extra := range []map[string]any{
+		{long: 1},
+		{strings.Repeat("\x01", 8<<10): 1},
+		{"q": map[string]any{long: make(chan int)}},
+	} {
+		b := perfExtra(extra)
+		is.True(len(b) <= perfExtraMax)
+		var note map[string]string
+		is.NoErr(json.Unmarshal(b, &note))
+		is.True(note["invalid"] != "")
+	}
 }

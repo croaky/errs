@@ -15,10 +15,6 @@ before a leak of a low-value key.
 1. `002-copy-and-bound-event-fields.md`: encode `Extra` on the caller
    goroutine, put a byte limit on each event field, and resolve slog
    `LogValuer` values.
-2. `003-bound-perf-record-fields.md`: put a byte limit on `Route`,
-   `Pattern`, and the `perfExtra` notes.
-
-Plans `002` and `003` touch different code and can go in parallel.
 
 ## Security findings
 
@@ -38,6 +34,3 @@ consequence, and the boundary.
 - `find_018QCU972JUpYvQnvjymceny` (medium, no byte limit on event
   fields): `002`.
 - `find_01HNZoye689yfFaMsVfvqaQL` (low, slog redaction skipped): `002`.
-- `find_01SPoaitRjRALBfBdHoKjk2T` (medium, perf `Route` limit): `003`.
-- `find_01R33icG43Zji1zZ67VDisKE` (medium, `perfExtra` note size):
-  `003`.

@@ -137,7 +137,8 @@ in which neither ran as four shares of the request. A nil `Elapsed`
 sends no split.
 
 Pass a route with no query string and no ids, so each page is one row.
-`RecordRequest` removes a query string in all cases.
+`RecordRequest` removes a query string in all cases. It sends a route
+past 256 bytes as `/{long}`, the label sockeye gives such a route.
 
 For a standard Go `http.ServeMux`, set `Pattern: r.Pattern` after the
 handler returns. The client sends this optional matched pattern without
@@ -145,7 +146,8 @@ changing its method, host, case or wildcard names. Sockeye uses it as
 the shared metrics and log-filter label. Include the same `pattern`
 field in the request log. A router that does not set `Request.Pattern`
 can leave it empty and keep the existing route behavior. Do not build a
-pattern from an untrusted URL.
+pattern from an untrusted URL. `RecordRequest` cuts a pattern past 256
+bytes.
 
 A record can also say who made the request and what it asked for:
 
@@ -172,9 +174,10 @@ search's filters or an MCP tool's name and arguments, and sockeye keeps
 a row for each record that has it. Its keys must match `[a-z0-9_]`, and
 its JSON must be at most 2 KiB. `RecordRequest` replaces an `Extra`
 that breaks a limit with an `invalid` or `truncated` note, because
-sockeye refuses a whole batch for one bad record. It cuts a `User` past
-64 bytes and drops a `Method` that is not one to sixteen letters. Do
-not send a token, a password, a cookie, or a mail body.
+sockeye refuses a whole batch for one bad record. A note holds no key
+and no error text, so it is always under the limit. It cuts a `User`
+past 64 bytes and drops a `Method` that is not one to sixteen letters.
+Do not send a token, a password, a cookie, or a mail body.
 
 sockeye takes the records only after an operator names the service's
 producer: `soc perf source <repo>/<service> post`. Until then it
