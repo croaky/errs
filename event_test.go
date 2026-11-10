@@ -2,6 +2,7 @@ package errs
 
 import (
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -147,4 +148,81 @@ func TestBucketHoldsNoEventAfterItsCount(t *testing.T) {
 	c.breakerMu.Lock()
 	defer c.breakerMu.Unlock()
 	is.Nil(bk.last)
+}
+
+// BenchmarkCaptureException measures the work CaptureException does
+// on the caller goroutine for a wrapped error with a handler-deep
+// stack, a tag, a request id, and an extra.
+func BenchmarkCaptureException(b *testing.B) {
+	benchInit(b)
+	err := deepErr(16)
+	b.ReportAllocs()
+	for b.Loop() {
+		CaptureException(err, WithTag("job", "worker.RefreshItem"), WithRequestID("01J9ZQ4N8V2K7"), WithExtra("company_id", 42))
+	}
+}
+
+// BenchmarkCaptureMessage measures CaptureMessage with a level and a
+// map extra.
+func BenchmarkCaptureMessage(b *testing.B) {
+	benchInit(b)
+	extra := map[string]any{"rows": 1200, "table": "positions", "took": 1500 * time.Millisecond}
+	b.ReportAllocs()
+	for b.Loop() {
+		CaptureMessage("import finished with 3 skipped rows", WithLevel("warning"), WithExtra("import", extra))
+	}
+}
+
+// BenchmarkExceptionFromError measures the stack frame resolution and
+// the type name of one exception.
+func BenchmarkExceptionFromError(b *testing.B) {
+	err := deepErr(16)
+	root := "/Users/dev/src/github.com/croaky/errs"
+	b.ReportAllocs()
+	for b.Loop() {
+		exceptionFromError(err, nil, root, "github.com/croaky/errs")
+	}
+}
+
+// BenchmarkEncodeExtra measures the encode of one extra on the caller
+// goroutine, for small values and for a value past maxExtraBytes.
+func BenchmarkEncodeExtra(b *testing.B) {
+	cases := []struct {
+		name string
+		v    any
+	}{
+		{"string", "positions"},
+		{"int", 42},
+		{"map", map[string]any{"rows": 1200, "table": "positions", "took": 1500 * time.Millisecond}},
+		{"error", errors.New("connection reset by peer")},
+		{"large", strings.Repeat("x", 4<<10)},
+	}
+	for _, c := range cases {
+		b.Run(c.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				encodeExtra(c.v)
+			}
+		})
+	}
+}
+
+// BenchmarkCut measures cut for a string under the limit and for one
+// past it.
+func BenchmarkCut(b *testing.B) {
+	short := "worker.RefreshItem"
+	long := strings.Repeat("é", maxMessageBytes)
+	b.Run("short", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			cut(short, maxTagBytes)
+		}
+	})
+	b.Run("long", func(b *testing.B) {
+		b.ReportAllocs()
+		b.SetBytes(maxMessageBytes)
+		for b.Loop() {
+			cut(long, maxMessageBytes)
+		}
+	})
 }

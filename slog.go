@@ -40,7 +40,8 @@ func (h slogHandler) WithGroup(name string) slog.Handler {
 
 func captureRecord(r slog.Record) {
 	var cause error
-	opts := []Option{WithTag("log", r.Message)}
+	opts := make([]Option, 1, 1+r.NumAttrs())
+	opts[0] = WithTag("log", r.Message)
 	r.Attrs(func(a slog.Attr) bool {
 		v := a.Value.Resolve()
 		if e, ok := v.Any().(error); ok && a.Key == "err" {

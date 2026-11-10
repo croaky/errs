@@ -239,9 +239,14 @@ func CaptureException(err error, opts ...Option) string {
 	if c == nil {
 		return ""
 	}
-	fallback := callers(2)
+	// Read the caller stack only when err carries none, since
+	// runtime.Callers costs more than the rest of the capture.
+	pcs := stackFromError(err)
+	if pcs == nil {
+		pcs = callers(2)
+	}
 	e := c.newEvent("error", opts)
-	e.Exception = exceptionFromError(err, fallback, c.root, c.inAppPrefix)
+	e.Exception = exceptionFromError(err, pcs, c.root, c.inAppPrefix)
 	c.dispatch(e)
 	return e.EventID
 }
@@ -423,7 +428,9 @@ func newEventID() string {
 	if _, err := rand.Read(b[:]); err != nil {
 		return "00000000000000000000000000000000"
 	}
-	return hex.EncodeToString(b[:])
+	var h [32]byte
+	hex.Encode(h[:], b[:])
+	return string(h[:])
 }
 
 // buildRevision returns the VCS commit that the Go build info records,

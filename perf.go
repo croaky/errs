@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -73,8 +72,21 @@ const (
 	perfExtraMax   = 2 << 10 // 2 KiB, sockeye's limit
 )
 
-// perfExtraKey is the form sockeye takes for an Extra key.
-var perfExtraKey = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
+// perfExtraKey reports whether k has the form sockeye takes for an
+// Extra key: 1 to 64 bytes of [a-z0-9_]. It is the regexp
+// ^[a-z0-9_]{1,64}$ as a byte loop, since RecordRequest checks each
+// key of each record.
+func perfExtraKey(k string) bool {
+	if len(k) == 0 || len(k) > 64 {
+		return false
+	}
+	for i := 0; i < len(k); i++ {
+		if c := k[i]; (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
+			return false
+		}
+	}
+	return true
+}
 
 // DBElapsed is a request's wall time in which only queries ran, only
 // pool waits ran, or both ran at once. The three never overlap, so
@@ -180,7 +192,7 @@ func perfExtra(extra map[string]any) jsontext.Value {
 		return nil
 	}
 	for k := range extra {
-		if !perfExtraKey.MatchString(k) {
+		if !perfExtraKey(k) {
 			return jsontext.Value(`{"invalid":"extra keys must match [a-z0-9_] and be at most 64 bytes"}`)
 		}
 	}

@@ -62,6 +62,43 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+// acceptClient answers each request with 202 and no network, so a
+// benchmark measures errs and not the loopback stack.
+func acceptClient() *http.Client {
+	return &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		return &http.Response{StatusCode: 202, Body: http.NoBody, Header: http.Header{}, Request: r}, nil
+	})}
+}
+
+// benchInit starts a client that sends to acceptClient, and flushes
+// it when the benchmark ends.
+func benchInit(b *testing.B) *client {
+	b.Helper()
+	active.Store(nil)
+	if err := Init(Options{
+		DSN:         testDSN,
+		Environment: "production",
+		Release:     "4387d81",
+		ServerName:  "web-1",
+		InAppPrefix: "github.com/croaky/errs",
+		HTTPClient:  acceptClient(),
+	}); err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { Flush(5 * time.Second); active.Store(nil) })
+	return active.Load()
+}
+
+// deepErr returns an error that Wrap made depth calls down, so its
+// stack has the depth of a request handler in an application.
+func deepErr(depth int) error {
+	if depth == 0 {
+		return Wrap(fmt.Errorf("query companies: %w", errors.New("connection reset by peer")), "load page 42")
+	}
+	return deepErr(depth - 1)
+}
+
 type testCustomErr struct{}
 
 func (testCustomErr) Error() string { return "custom" }
@@ -450,4 +487,19 @@ func TestInitReadsReleaseFromBuildInfo(t *testing.T) {
 	resetActive(t)
 	is.NoErr(Init(Options{DSN: testDSN, Release: "v9"}))
 	is.Eq(active.Load().release, "v9")
+}
+
+// TestInAppAndRelativeTo: inApp takes a function in the module or a
+// package under it, and relativeTo trims the root and its slash.
+func TestInAppAndRelativeTo(t *testing.T) {
+	is := is.New(t)
+	is.True(inApp("github.com/a/b.F", "github.com/a/b"))
+	is.True(inApp("github.com/a/b/c.F", "github.com/a/b/"))
+	is.True(!inApp("github.com/a/bc.F", "github.com/a/b"))
+	is.True(!inApp("github.com/a/b", "github.com/a/b"))
+	is.True(!inApp("github.com/a/b.F", ""))
+	is.Eq(relativeTo("/src/app/main.go", "/src/app"), "main.go")
+	is.Eq(relativeTo("/src/appx/main.go", "/src/app"), "/src/appx/main.go")
+	is.Eq(relativeTo("/src/app", "/src/app"), "/src/app")
+	is.Eq(relativeTo("/src/app/main.go", ""), "/src/app/main.go")
 }

@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -393,6 +394,22 @@ func TestFingerprintKey(t *testing.T) {
 	}
 	is.Eq(fingerprintKey(framed("f")), fingerprintKey(framed("f")))
 	is.True(fingerprintKey(framed("f")) != fingerprintKey(framed("g")))
+
+	// The exact keys, so a change to their form shows in a test.
+	is.Eq(fingerprintKey(a), "message:job ? failed")
+	is.Eq(fingerprintKey(framed("f")), "frames:T\x00f@a.go")
+	deep := framed("f")
+	deep.Exception.Values[0].Stacktrace.Frames = []frame{
+		{Function: "a", Filename: "a.go", InApp: true},
+		{Function: "lib", Filename: "lib.go"},
+		{Function: "b", Filename: "b.go", InApp: true},
+		{Function: "c", Filename: "c.go", InApp: true},
+		{Function: "d", Filename: "d.go", InApp: true},
+	}
+	is.Eq(fingerprintKey(deep), "frames:T\x00d@d.go\x00c@c.go\x00b@b.go")
+	deep.Exception.Values[0].Stacktrace = nil
+	is.Eq(fingerprintKey(deep), "type:T\x00v ?")
+	is.Eq(fingerprintKey(&event{}), "")
 }
 
 func TestAsyncFlushSendsHeldCounts(t *testing.T) {
@@ -480,4 +497,83 @@ func sendNow(c *client, msg string, opts ...Option) {
 	e := c.newEvent("info", opts)
 	e.Message = truncate(msg)
 	c.send(e)
+}
+
+// benchEvent returns an exception event as CaptureException builds it.
+func benchEvent(b *testing.B) *event {
+	b.Helper()
+	c := &client{environment: "production", release: "4387d81", serverName: "web-1"}
+	e := c.newEvent("error", []Option{WithTag("job", "worker.RefreshItem"), WithRequestID("01J9ZQ4N8V2K7"), WithExtra("company_id", 42)})
+	e.Exception = exceptionFromError(deepErr(16), nil, "/Users/dev/src/github.com/croaky/errs", "github.com/croaky/errs")
+	return e
+}
+
+// BenchmarkFingerprintKey measures the sampling key for each of its
+// three forms.
+func BenchmarkFingerprintKey(b *testing.B) {
+	framed := benchEvent(b)
+	typed := benchEvent(b)
+	typed.Exception.Values[0].Stacktrace = nil
+	cases := []struct {
+		name string
+		e    *event
+	}{
+		{"own", &event{Fingerprint: []string{"slow", "GET", "/companies/show"}}},
+		{"frames", framed},
+		{"type", typed},
+		{"message", &event{Message: "job 1742 failed after 3 tries in 2500 ms"}},
+	}
+	for _, c := range cases {
+		b.Run(c.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				fingerprintKey(c.e)
+			}
+		})
+	}
+}
+
+// BenchmarkEncodeEvent measures the JSON body of one exception event.
+func BenchmarkEncodeEvent(b *testing.B) {
+	e := benchEvent(b)
+	body, err := json.Marshal(e, wireJSON)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _ = json.Marshal(e, wireJSON)
+	}
+}
+
+// BenchmarkSendHeld measures the worker path for an error past
+// fullPerWindow, which holds the event and sends nothing. An error
+// storm runs this path for each event.
+func BenchmarkSendHeld(b *testing.B) {
+	clock := newTestClock()
+	c := &client{clock: clock.Now, httpClient: acceptClient(), buckets: map[string]*bucket{}}
+	e := benchEvent(b)
+	for range fullPerWindow + 1 {
+		c.send(e)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		c.send(e)
+	}
+}
+
+// TestWriteNoDigitsMatchesRegexp: writeNoDigits gives the result of the
+// regexp [0-9]+ with ReplaceAllString, the form fingerprintKey had.
+func TestWriteNoDigitsMatchesRegexp(t *testing.T) {
+	is := is.New(t)
+	re := regexp.MustCompile(`[0-9]+`)
+	for _, s := range []string{
+		"", "7", "abc", "job 17 failed", "0042abc99", "x1y22z333",
+		"bad \xff 12 byte", "١٢٣ arabic digits stay", "a-1.5e10",
+	} {
+		var b strings.Builder
+		writeNoDigits(&b, s)
+		is.Eq(b.String(), re.ReplaceAllString(s, "?"))
+	}
 }

@@ -6,7 +6,6 @@ import (
 	"encoding/json/v2"
 	"maps"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -194,34 +193,93 @@ func (c *client) record(ok bool, now time.Time) {
 	}
 }
 
-var digits = regexp.MustCompile(`[0-9]+`)
-
 // fingerprintKey names the error an event belongs to, for sampling.
 // It follows the order sockeye groups by: the event's own
 // fingerprint, else the type and the top three in-app frames, else the
-// type and the message with its digits replaced.
+// type and the message with its digits replaced. The worker calls it
+// for each event, so it builds the key in one strings.Builder.
 func fingerprintKey(e *event) string {
+	var b strings.Builder
 	if len(e.Fingerprint) > 0 {
-		return "own:" + strings.Join(e.Fingerprint, "\x00")
+		n := len("own:") + len(e.Fingerprint) - 1
+		for _, p := range e.Fingerprint {
+			n += len(p)
+		}
+		b.Grow(n)
+		b.WriteString("own:")
+		for i, p := range e.Fingerprint {
+			if i > 0 {
+				b.WriteByte(0)
+			}
+			b.WriteString(p)
+		}
+		return b.String()
 	}
 	if e.Exception != nil && len(e.Exception.Values) > 0 {
 		v := e.Exception.Values[len(e.Exception.Values)-1]
-		var top []string
+		var (
+			top  [3]*frame
+			nTop int
+		)
+		n := len("frames:") + len(v.Type)
 		if v.Stacktrace != nil {
 			frames := v.Stacktrace.Frames
-			for i := len(frames) - 1; i >= 0 && len(top) < 3; i-- {
-				if frames[i].InApp {
-					top = append(top, frames[i].Function+"@"+frames[i].Filename)
+			for i := len(frames) - 1; i >= 0 && nTop < len(top); i-- {
+				if f := &frames[i]; f.InApp {
+					top[nTop] = f
+					nTop++
+					n += 2 + len(f.Function) + len(f.Filename)
 				}
 			}
 		}
-		if len(top) > 0 {
-			return "frames:" + v.Type + "\x00" + strings.Join(top, "\x00")
+		if nTop > 0 {
+			b.Grow(n)
+			b.WriteString("frames:")
+			b.WriteString(v.Type)
+			for _, f := range top[:nTop] {
+				b.WriteByte(0)
+				b.WriteString(f.Function)
+				b.WriteByte('@')
+				b.WriteString(f.Filename)
+			}
+			return b.String()
 		}
-		return "type:" + v.Type + "\x00" + digits.ReplaceAllString(v.Value, "?")
+		b.Grow(len("type:") + len(v.Type) + 1 + len(v.Value))
+		b.WriteString("type:")
+		b.WriteString(v.Type)
+		b.WriteByte(0)
+		writeNoDigits(&b, v.Value)
+		return b.String()
 	}
 	if e.Message != "" {
-		return "message:" + digits.ReplaceAllString(e.Message, "?")
+		b.Grow(len("message:") + len(e.Message))
+		b.WriteString("message:")
+		writeNoDigits(&b, e.Message)
+		return b.String()
 	}
 	return ""
 }
+
+// writeNoDigits writes s to b with each run of ASCII digits replaced
+// by one "?". It gives the result of the regexp [0-9]+ with
+// ReplaceAllString, at a small part of the cost. Other bytes, invalid
+// UTF-8 too, go through unchanged.
+func writeNoDigits(b *strings.Builder, s string) {
+	for i := 0; i < len(s); {
+		if !isDigit(s[i]) {
+			j := i + 1
+			for j < len(s) && !isDigit(s[j]) {
+				j++
+			}
+			b.WriteString(s[i:j])
+			i = j
+			continue
+		}
+		b.WriteByte('?')
+		for i < len(s) && isDigit(s[i]) {
+			i++
+		}
+	}
+}
+
+func isDigit(c byte) bool { return '0' <= c && c <= '9' }

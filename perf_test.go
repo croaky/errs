@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -439,5 +440,85 @@ func TestPerfExtraNoteSize(t *testing.T) {
 		var note map[string]string
 		is.NoErr(json.Unmarshal(b, &note))
 		is.True(note["invalid"] != "")
+	}
+}
+
+// BenchmarkRecordRequest measures RecordRequest on the caller
+// goroutine, for a plain record, a record with a user, a method, and
+// an extra, and a record whose route has a query string.
+func BenchmarkRecordRequest(b *testing.B) {
+	cases := []struct {
+		name string
+		r    Request
+	}{
+		{"plain", Request{Route: "/companies/show", Pattern: "GET /companies/{id}", Status: 200,
+			Duration: 42 * time.Millisecond, DB: 12 * time.Millisecond, Acquire: time.Millisecond, DBTimed: true}},
+		{"detail", Request{Route: "/search", Status: 200, Duration: 80 * time.Millisecond,
+			User: "1742", Method: "get", Extra: map[string]any{"q": "acme", "sort": "name", "page": 2},
+			Elapsed: &DBElapsed{QueryOnly: 30 * time.Millisecond, WaitOnly: time.Millisecond}}},
+		{"query", Request{Route: "/companies/show?id=42&tab=positions", Status: 200, Duration: 42 * time.Millisecond}},
+	}
+	for _, c := range cases {
+		b.Run(c.name, func(b *testing.B) {
+			benchInit(b)
+			RecordRequest(c.r) // start the sender and its queue
+			b.ReportAllocs()
+			for b.Loop() {
+				RecordRequest(c.r)
+			}
+		})
+	}
+}
+
+// BenchmarkPerfExtra measures the encode of a Request Extra, valid and
+// with a key that sockeye refuses.
+func BenchmarkPerfExtra(b *testing.B) {
+	valid := map[string]any{"q": "acme", "sort": "name", "page": 2, "tool_name": "search_companies"}
+	bad := map[string]any{"q": "acme", "Bad-Key": 1}
+	b.Run("valid", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			perfExtra(valid)
+		}
+	})
+	b.Run("badkey", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			perfExtra(bad)
+		}
+	})
+}
+
+// BenchmarkEncodePerfBatch measures the JSON body of one full batch.
+func BenchmarkEncodePerfBatch(b *testing.B) {
+	db, acquire := 12.0, 1.0
+	at := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	batch := make([]perfRecord, perfBatchMax)
+	for i := range batch {
+		batch[i] = perfRecord{Route: "/companies/show", Pattern: "GET /companies/{id}", Status: 200,
+			DurationMs: 42.5, DBMs: &db, AcquireMs: &acquire, Time: at, User: "1742", Method: "GET",
+			Extra: perfExtra(map[string]any{"q": "acme", "page": 2})}
+	}
+	body, err := json.Marshal(batch, wireJSON)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _ = json.Marshal(batch, wireJSON)
+	}
+}
+
+// TestPerfExtraKeyMatchesRegexp: perfExtraKey takes the keys that the
+// regexp ^[a-z0-9_]{1,64}$ takes, and no others.
+func TestPerfExtraKeyMatchesRegexp(t *testing.T) {
+	is := is.New(t)
+	re := regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
+	for _, k := range []string{
+		"", "q", "tool_name", "page2", "Q", "bad-key", "a b", "é",
+		strings.Repeat("a", 64), strings.Repeat("a", 65), "a\n", "\x00",
+	} {
+		is.Eq(perfExtraKey(k), re.MatchString(k))
 	}
 }

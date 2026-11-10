@@ -170,3 +170,16 @@ func TestSlogHandlerWithoutClientOnlyLogs(t *testing.T) {
 
 	is.True(strings.Contains(buf.String(), "no client"))
 }
+
+// BenchmarkSlogHandlerError measures one slog.Error call with an error
+// and attributes through SlogHandler, with a JSON log line to
+// io.Discard.
+func BenchmarkSlogHandlerError(b *testing.B) {
+	benchInit(b)
+	log := slog.New(SlogHandler(slog.NewJSONHandler(io.Discard, nil)))
+	err := deepErr(16)
+	b.ReportAllocs()
+	for b.Loop() {
+		log.Error("refresh item", "err", err, "company_id", 42, "attempt", 3, slog.Group("req", "method", "GET", "path", "/companies/42"))
+	}
+}

@@ -219,9 +219,13 @@ func isWrapperType(t reflect.Type) bool {
 	if base.Kind() == reflect.Pointer {
 		base = base.Elem()
 	}
-	switch base.PkgPath() + "." + base.Name() {
-	case "fmt.wrapError", "fmt.wrapErrors", "errors.joinError":
-		return true
+	// Compare the package and the name apart, so no string is built.
+	switch base.PkgPath() {
+	case "fmt":
+		name := base.Name()
+		return name == "wrapError" || name == "wrapErrors"
+	case "errors":
+		return base.Name() == "joinError"
 	default:
 		return false
 	}
@@ -232,7 +236,7 @@ func resolveFrames(pcs []uintptr, root, inAppPrefix string) []frame {
 	if len(pcs) == 0 {
 		return nil
 	}
-	var out []frame
+	out := make([]frame, 0, len(pcs))
 	cf := runtime.CallersFrames(pcs)
 	for {
 		f, more := cf.Next()
@@ -265,22 +269,24 @@ func resolveFrames(pcs []uintptr, root, inAppPrefix string) []frame {
 	return out
 }
 
-// inApp reports whether the function belongs to the application module.
+// inApp reports whether the function belongs to the application module:
+// fn starts with prefix and then "/" or ".". resolveFrames calls it
+// for each frame, so it builds no string.
 func inApp(fn, prefix string) bool {
 	prefix = strings.TrimSuffix(prefix, "/")
-	if prefix == "" {
+	if prefix == "" || len(fn) <= len(prefix) || !strings.HasPrefix(fn, prefix) {
 		return false
 	}
-	return strings.HasPrefix(fn, prefix+"/") || strings.HasPrefix(fn, prefix+".")
+	c := fn[len(prefix)]
+	return c == '/' || c == '.'
 }
 
-// relativeTo trims root from the file path when path starts with root.
+// relativeTo trims root and "/" from the file path when path starts
+// with them. resolveFrames calls it for each frame, so it builds no
+// string.
 func relativeTo(path, root string) string {
-	if root == "" {
+	if root == "" || len(path) <= len(root) || !strings.HasPrefix(path, root) || path[len(root)] != '/' {
 		return path
 	}
-	if strings.HasPrefix(path, root+"/") {
-		return path[len(root)+1:]
-	}
-	return path
+	return path[len(root)+1:]
 }
