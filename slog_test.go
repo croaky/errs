@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -158,6 +159,33 @@ func TestSlogHandlerResolvesLogValuer(t *testing.T) {
 	is.Eq(extra["token"], "REDACTED")
 	is.Eq(extra["user"], "[password=REDACTED]")
 	is.Eq(extra["err"], "REDACTED")
+}
+
+// TestSlogHandlerQueuedEventsHoldNoLongMessage: SlogHandler wraps an
+// untyped err attribute with the record message. Eight queued events
+// with 1 MiB messages keep much less than 8 MiB of heap in memory.
+func TestSlogHandlerQueuedEventsHoldNoLongMessage(t *testing.T) {
+	is := is.New(t)
+	resetActive(t)
+	t.Cleanup(func() { active.Store(nil) })
+	c := &client{queue: make(chan *event, 8), buckets: map[string]*bucket{}}
+	active.Store(c) // no worker, so the events stay in the queue
+	log := slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil)))
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for range 8 {
+		log.Error("bad input", "err", errors.New(strings.Repeat("a", 1<<20)))
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+
+	is.Eq(len(c.queue), 8)
+	ev := <-c.queue
+	is.Eq(ev.Exception.Values[0].Type, "bad input")
+	is.True(after.HeapAlloc < before.HeapAlloc+2<<20)
+	runtime.KeepAlive(c)
 }
 
 func TestSlogHandlerWithoutClientOnlyLogs(t *testing.T) {

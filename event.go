@@ -174,6 +174,7 @@ func errorTypeName(err error) string {
 }
 
 // titleFromMessage extracts the leading error phrase before the first ": ".
+// It returns a copy, so the title does not keep msg in memory.
 func titleFromMessage(msg string) string {
 	title, _, _ := strings.Cut(msg, ": ")
 	title = strings.TrimSpace(title)
@@ -183,7 +184,7 @@ func titleFromMessage(msg string) string {
 	if strings.ContainsFunc(title, notLabelRune) {
 		return ""
 	}
-	return title
+	return strings.Clone(title)
 }
 
 func notLabelRune(r rune) bool {

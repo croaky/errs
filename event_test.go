@@ -145,6 +145,25 @@ func TestEventCopiesShortStrings(t *testing.T) {
 	is.True(!shares(e.Message, line))
 }
 
+// TestExceptionCopiesTypeTitle: the type title of a plain error is a
+// prefix of the error message. The exception holds a copy of the title,
+// so a queued event does not keep a long message in memory.
+func TestExceptionCopiesTypeTitle(t *testing.T) {
+	is := is.New(t)
+	long := "bad input: " + strings.Repeat("a", 1<<20)
+	for _, err := range []error{
+		errors.New(long),
+		fmt.Errorf("%w", errors.New(long)),
+		Wrap(errors.New(strings.Repeat("a", 1<<20)), "bad input"),
+	} {
+		msg := err.Error()
+		val := exceptionFromError(err, nil, "", "").Values[0]
+		is.Eq(val.Type, "bad input")
+		is.True(!shares(val.Type, msg))
+		is.True(!shares(val.Value, msg))
+	}
+}
+
 // TestBucketHoldsNoEventAfterItsCount: after send or flushCounts posts
 // the count of a bucket, the bucket holds no event.
 func TestBucketHoldsNoEventAfterItsCount(t *testing.T) {
