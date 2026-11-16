@@ -52,7 +52,7 @@ func zeroRetryDelays() {
 //
 // DSN is a sockeye DSN, the output of `soc error dsn create`.
 // SockeyeDSN is an alias for DSN kept for backwards compatibility.
-// With neither set, error reporting is off and Init returns no error.
+// With neither a DSN nor Journal set, error reporting is off.
 type Options struct {
 	DSN         string
 	SockeyeDSN  string
@@ -62,6 +62,10 @@ type Options struct {
 	HTTPClient  *http.Client
 	InAppPrefix string
 	Clock       func() time.Time
+	// Journal writes versioned, single-line error events to this writer.
+	// It is exclusive with DSN/SockeyeDSN and sends no request metrics.
+	// The caller owns the writer and its trusted host collection binding.
+	Journal io.Writer
 	// CaptureUsage says that the service sets Request.User on the
 	// requests it counts, such as every signed-in request. Each perf
 	// batch then carries the header Perf-Capture: usage, and sockeye
@@ -128,6 +132,7 @@ func WithLevel(level string) Option {
 
 type client struct {
 	dsn          dsn
+	journal      io.Writer
 	environment  string
 	release      string
 	serverName   string
@@ -167,19 +172,26 @@ func (c *client) now() time.Time {
 var active atomic.Pointer[client]
 
 // Init initializes the global error reporting client.
-// With no DSN and no SockeyeDSN, reporting is off and Init returns nil.
+// With no DSN, SockeyeDSN or Journal, reporting is off and Init returns nil.
 func Init(opts Options) error {
 	rawDSN := opts.DSN
 	if rawDSN == "" {
 		rawDSN = opts.SockeyeDSN
 	}
-	if rawDSN == "" {
+	if rawDSN != "" && opts.Journal != nil {
+		return fmt.Errorf("choose Journal or an HTTP DSN, not both")
+	}
+	if rawDSN == "" && opts.Journal == nil {
 		active.Store(nil)
 		return nil
 	}
-	d, err := parseDSN(rawDSN)
-	if err != nil {
-		return err
+	var d dsn
+	if rawDSN != "" {
+		var err error
+		d, err = parseDSN(rawDSN)
+		if err != nil {
+			return err
+		}
 	}
 	hc := opts.HTTPClient
 	if hc == nil {
@@ -203,6 +215,7 @@ func Init(opts Options) error {
 	}
 	c := &client{
 		dsn:          d,
+		journal:      opts.Journal,
 		environment:  opts.Environment,
 		release:      opts.Release,
 		serverName:   serverName,

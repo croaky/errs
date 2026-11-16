@@ -235,3 +235,34 @@ The request path protects both ends of the connection too:
   global `log` logger. A host that bridges `log` into `SlogHandler`
   does not turn a failed send into a new event.
 - Frames matching the application module path are marked as `in_app`.
+
+## Explicit journal sink
+
+A TLS-free service can choose `Options{Journal: os.Stdout}` instead of an
+HTTP DSN. Journal and DSN/SockeyeDSN are mutually exclusive. This option
+writes error events only; `RecordRequest` sends nothing for this client.
+Request logs keep their separate journal producer.
+
+The existing bounded queue, capture-time copies, sampling and circuit
+breaker stay in place. Each output is one `sockeye.error.v1` marker,
+then the existing event JSON and a newline. Exception type and stack,
+event ID, release and fingerprint retain their existing fields. String
+newlines are JSON escapes. An encoded body over 256 KiB is dropped with
+a size diagnostic, not a partial event. The SDK does not add a source
+claim or credential to the line. Trusted host policy must bind the console
+unit to its service before collection is enabled.
+
+The writer gets one Write per event. A failed or short write is counted
+as dropped, not retried into a possible partial line. Diagnostics do not
+print event contents or a writer's arbitrary error text. The SDK does not
+close a writer owned by the caller. A successful Write proves only that
+the writer accepted bytes, not journal persistence or server acceptance.
+Process death can lose buffered events, and journal loss is unknown time.
+
+Self-redacting slog values still resolve at capture time. This is not a
+general secret scanner: do not put secrets in event text or metadata.
+The SDK installs no panic hook. A caller that logs a recovered panic must
+re-panic when continuing would leave the process unsafe.
+
+This library option does not change a consumer, enable a live source,
+create credentials, or configure a host collector.

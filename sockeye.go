@@ -153,6 +153,15 @@ func (c *client) post(e *event, count int) {
 		return
 	}
 
+	if c.journal != nil {
+		ok := c.writeJournal(body)
+		c.record(ok, c.now())
+		if !ok {
+			c.dropped.Add(dropped + int64(lost))
+		}
+		return
+	}
+
 	ok := c.deliver("sockeye", func() (*http.Request, error) {
 		req, err := http.NewRequest(http.MethodPost, c.dsn.endpoint, bytes.NewReader(body))
 		if err != nil {

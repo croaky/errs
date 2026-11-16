@@ -250,11 +250,11 @@ type perfSender struct {
 
 // RecordRequest queues one request for sockeye's perf page. It never
 // blocks: a full queue drops the request and counts it. It does
-// nothing when Init got no DSN. The sender starts on the first call,
+// nothing for a journal-only client or when Init got no DSN. The sender starts on the first call,
 // so a process that records no requests posts nothing.
 func RecordRequest(r Request) {
 	c := active.Load()
-	if c == nil {
+	if c == nil || c.journal != nil {
 		return
 	}
 	if s := c.perfSender(); s != nil {

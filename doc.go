@@ -5,12 +5,13 @@
 // and Wrap, Errorf, and PanicError to attach stack traces to errors.
 //
 // Events are queued on a bounded channel and sent to sockeye over HTTP
-// with retries and backoff. The client includes sampling by error and
+// with retries and backoff, or to an explicitly chosen journal writer. The client includes sampling by error and
 // a circuit breaker.
 //
 // RecordRequest sends served requests to sockeye's perf page through a
 // sender of its own, with its own bounded queue and circuit breaker. It
-// posts to /perf/<repo>/<service> on the DSN's host. A request can
+// posts to /perf/<repo>/<service> on the DSN's host. A journal-only client
+// sends no request metrics. A request can
 // carry a user id for usage counts and extra properties for a request
 // the service chose to inspect.
 package errs
