@@ -5,8 +5,10 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -127,19 +129,41 @@ func eventKey(s string) string {
 }
 
 // encodeExtra encodes one extra value as JSON on the caller goroutine,
-// so the worker reads no memory the caller can still change. A value
-// that JSON cannot encode, such as an error, a channel, or a NaN, goes
-// as its fmt.Sprint text. A value whose encoding is past maxExtraBytes,
-// or whose marshal method panics, goes as a short note.
+// so the worker reads no memory the caller can still change. An error
+// goes as Error(), and a non-finite float goes as its text. Any other
+// value that JSON cannot encode, or whose marshal method panics, goes
+// as a fixed note so hidden fields never fall back to fmt text. A
+// value whose encoding is past maxExtraBytes goes as a size note.
 func encodeExtra(v any) (out jsontext.Value) {
 	defer func() {
 		if r := recover(); r != nil {
 			out = noteValue("extra value panicked while it encoded")
 		}
 	}()
-	b, err := json.Marshal(v, wireJSON)
+	var (
+		b   []byte
+		err error
+	)
+	switch x := v.(type) {
+	case error:
+		b, err = json.Marshal(x.Error(), wireJSON)
+	case float64:
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			b, err = json.Marshal(strconv.FormatFloat(x, 'g', -1, 64), wireJSON)
+		} else {
+			b, err = json.Marshal(x, wireJSON)
+		}
+	case float32:
+		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
+			b, err = json.Marshal(strconv.FormatFloat(float64(x), 'g', -1, 32), wireJSON)
+		} else {
+			b, err = json.Marshal(x, wireJSON)
+		}
+	default:
+		b, err = json.Marshal(v, wireJSON)
+	}
 	if err != nil {
-		b, _ = json.Marshal(cut(fmt.Sprint(v), maxExtraBytes-64), wireJSON)
+		return noteValue("extra value could not encode")
 	}
 	if len(b) > maxExtraBytes {
 		return noteValue(fmt.Sprintf("extra was %d bytes; the limit is %d", len(b), maxExtraBytes))

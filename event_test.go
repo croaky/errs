@@ -1,9 +1,11 @@
 package errs
 
 import (
+	"bytes"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +68,129 @@ func TestExtraMarshalPanicIsContained(t *testing.T) {
 	extra := reqs[0].ev["extra"].(map[string]any)
 	is.Eq(extra["ok"], 1.0)
 	is.True(strings.Contains(extra["v"].(string), "panic"))
+}
+
+type failingJSONSecret struct {
+	priv string
+}
+
+func (failingJSONSecret) MarshalJSON() ([]byte, error) { return nil, errors.New("marshal json failed") }
+
+type failingTextSecret struct {
+	priv string
+}
+
+func (failingTextSecret) MarshalText() ([]byte, error) { return nil, errors.New("marshal text failed") }
+
+type panickingExtraSecret struct {
+	priv string
+}
+
+func (panickingExtraSecret) MarshalJSON() ([]byte, error) { panic("marshal panic") }
+
+// TestExtraEncodeFailureDoesNotLeakHiddenFields: when WithExtra receives
+// a value that fails JSON encoding or panics, the event arrives with a
+// fixed note on both the HTTP sink and the journal sink, without
+// leaking json:"-" or unexported fields via fmt.Sprint.
+func TestExtraEncodeFailureDoesNotLeakHiddenFields(t *testing.T) {
+	type withChan struct {
+		Ch     chan int
+		Hidden string `json:"-"`
+		priv   string
+	}
+	type withFunc struct {
+		Fn     func()
+		Hidden string `json:"-"`
+		priv   string
+	}
+	type withNaN struct {
+		Score  float64
+		Hidden string `json:"-"`
+		priv   string
+	}
+
+	sinks := []struct {
+		name string
+		send func(t *testing.T, fn func()) (string, map[string]any)
+	}{
+		{
+			name: "http",
+			send: func(t *testing.T, fn func()) (string, map[string]any) {
+				t.Helper()
+				is := is.New(t)
+				resetActive(t)
+				srv := newSockeyeServer(t)
+				t.Cleanup(srv.Close)
+				is.NoErr(Init(Options{DSN: testDSN, HTTPClient: rewriteTransport(srv.URL)}))
+				t.Cleanup(func() { Flush(time.Second) })
+				fn()
+				Flush(time.Second)
+				ev := srv.firstEvent(t)
+				body, err := json.Marshal(ev)
+				is.NoErr(err)
+				return string(body), ev["extra"].(map[string]any)
+			},
+		},
+		{
+			name: "journal",
+			send: func(t *testing.T, fn func()) (string, map[string]any) {
+				t.Helper()
+				is := is.New(t)
+				resetActive(t)
+				var out bytes.Buffer
+				is.NoErr(Init(Options{Journal: &out}))
+				t.Cleanup(func() { Flush(time.Second) })
+				fn()
+				Flush(time.Second)
+				line := strings.TrimSuffix(out.String(), "\n")
+				body, ok := strings.CutPrefix(line, journalPrefix)
+				is.True(ok)
+				var ev map[string]any
+				is.NoErr(json.Unmarshal([]byte(body), &ev))
+				return body, ev["extra"].(map[string]any)
+			},
+		},
+	}
+
+	for _, sink := range sinks {
+		t.Run(sink.name, func(t *testing.T) {
+			is := is.New(t)
+			body, extra := sink.send(t, func() {
+				CaptureMessage("extra failure",
+					WithExtra("ch", withChan{Ch: make(chan int), Hidden: "secret-ch-tag", priv: "secret-ch-priv"}),
+					WithExtra("fn", withFunc{Fn: func() {}, Hidden: "secret-fn-tag", priv: "secret-fn-priv"}),
+					WithExtra("nan_struct", withNaN{Score: math.NaN(), Hidden: "secret-nan-tag", priv: "secret-nan-priv"}),
+					WithExtra("bad_json", failingJSONSecret{priv: "secret-json-err"}),
+					WithExtra("bad_text", failingTextSecret{priv: "secret-text-err"}),
+					WithExtra("panic_json", panickingExtraSecret{priv: "secret-panic-err"}),
+					WithExtra("cause", errors.New("boom")),
+					WithExtra("ratio", math.NaN()),
+					WithExtra("inf", math.Inf(1)),
+					WithExtra("ok", 1),
+				)
+			})
+			for _, leaked := range []string{
+				"secret-ch-tag", "secret-ch-priv",
+				"secret-fn-tag", "secret-fn-priv",
+				"secret-nan-tag", "secret-nan-priv",
+				"secret-json-err", "secret-text-err", "secret-panic-err",
+			} {
+				is.True(!strings.Contains(body, leaked))
+			}
+			for _, key := range []string{"ch", "fn", "nan_struct", "bad_json", "bad_text"} {
+				s, ok := extra[key].(string)
+				is.True(ok)
+				is.True(strings.Contains(s, "could not encode"))
+			}
+			p, ok := extra["panic_json"].(string)
+			is.True(ok)
+			is.True(strings.Contains(p, "panicked"))
+			is.Eq(extra["cause"], "boom")
+			is.Eq(extra["ratio"], "NaN")
+			is.Eq(extra["inf"], "+Inf")
+			is.Eq(extra["ok"], 1.0)
+		})
+	}
 }
 
 // TestEventFieldsHaveByteLimits: tags, extras, fingerprint parts, and

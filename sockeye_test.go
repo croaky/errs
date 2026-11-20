@@ -448,8 +448,9 @@ func TestAsyncFlushSendsHeldCounts(t *testing.T) {
 // TestSockeyeEventSurvivesBadValues: an event with invalid UTF-8 in its
 // message, a tag, and an extra value still reaches sockeye, with U+FFFD
 // in place of each bad byte. A time.Duration goes as integer
-// nanoseconds, as encoding/json v1 sent it. A value JSON cannot encode
-// goes as its fmt.Sprint text, and the rest of extra stays as it is.
+// nanoseconds, as encoding/json v1 sent it. An error goes as Error(),
+// a non-finite float goes as its text, and the rest of extra stays as
+// it is.
 func TestSockeyeEventSurvivesBadValues(t *testing.T) {
 	is := is.New(t)
 	resetActive(t)
