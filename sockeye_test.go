@@ -1,13 +1,18 @@
 package errs
 
 import (
+	"bytes"
 	"encoding/json/v2"
 	"errors"
+	"hash/maphash"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -379,12 +384,14 @@ func TestFullQueueCountsDropped(t *testing.T) {
 
 func TestFingerprintKey(t *testing.T) {
 	is := is.New(t)
+	seed := maphash.MakeSeed()
+	key := func(e *event) uint64 { return fingerprintKey(seed, e) }
 	own := &event{Fingerprint: []string{"slow", "GET", "/x"}}
-	is.Eq(fingerprintKey(own), "own:slow\x00GET\x00/x")
+	is.Eq(key(own), maphash.String(seed, "own:slow\x00GET\x00/x"))
 
 	a := &event{Message: "job 17 failed"}
 	b := &event{Message: "job 18 failed"}
-	is.Eq(fingerprintKey(a), fingerprintKey(b))
+	is.Eq(key(a), key(b))
 
 	framed := func(fn string) *event {
 		return &event{Exception: &exceptionPayload{Values: []exceptionValue{{
@@ -392,12 +399,13 @@ func TestFingerprintKey(t *testing.T) {
 			Stacktrace: &stacktrace{Frames: []frame{{Function: fn, Filename: "a.go", Lineno: 3, InApp: true}}},
 		}}}}
 	}
-	is.Eq(fingerprintKey(framed("f")), fingerprintKey(framed("f")))
-	is.True(fingerprintKey(framed("f")) != fingerprintKey(framed("g")))
+	is.Eq(key(framed("f")), key(framed("f")))
+	is.True(key(framed("f")) != key(framed("g")))
 
-	// The exact keys, so a change to their form shows in a test.
-	is.Eq(fingerprintKey(a), "message:job ? failed")
-	is.Eq(fingerprintKey(framed("f")), "frames:T\x00f@a.go")
+	// The text that each key hashes, so a change to its form shows in a
+	// test.
+	is.Eq(key(a), maphash.String(seed, "message:job ? failed"))
+	is.Eq(key(framed("f")), maphash.String(seed, "frames:T\x00f@a.go"))
 	deep := framed("f")
 	deep.Exception.Values[0].Stacktrace.Frames = []frame{
 		{Function: "a", Filename: "a.go", InApp: true},
@@ -406,10 +414,15 @@ func TestFingerprintKey(t *testing.T) {
 		{Function: "c", Filename: "c.go", InApp: true},
 		{Function: "d", Filename: "d.go", InApp: true},
 	}
-	is.Eq(fingerprintKey(deep), "frames:T\x00d@d.go\x00c@c.go\x00b@b.go")
+	is.Eq(key(deep), maphash.String(seed, "frames:T\x00d@d.go\x00c@c.go\x00b@b.go"))
 	deep.Exception.Values[0].Stacktrace = nil
-	is.Eq(fingerprintKey(deep), "type:T\x00v ?")
-	is.Eq(fingerprintKey(&event{}), "")
+	is.Eq(key(deep), maphash.String(seed, "type:T\x00v ?"))
+	is.Eq(key(&event{}), maphash.String(seed, ""))
+
+	// A seed sets the key, so a caller cannot craft two texts with one
+	// hash for every client. The key never names the overflow bucket.
+	is.True(key(a) != fingerprintKey(maphash.MakeSeed(), a))
+	is.True(key(a) != overflowKey)
 }
 
 func TestAsyncFlushSendsHeldCounts(t *testing.T) {
@@ -491,6 +504,232 @@ func TestFlushCountsForgetsQuietErrors(t *testing.T) {
 	is.Eq(len(c.buckets), 1)
 }
 
+// keyCollisions are pairs of keys that name one JSON object member
+// once the encoder replaces each invalid byte with U+FFFD.
+var keyCollisions = [][2]string{
+	{"k\xff", "k\xfe"},
+	{"k\xff", "k\uFFFD"},
+	{strings.Repeat("a", 60) + "\xff\xfe\xfe\xfe", strings.Repeat("a", 60) + "\xff\xfe\xfe\xfd"},
+	// Each key is 64 bytes. The replacement makes each one longer, and
+	// the cut then trims both to the same 63 bytes.
+	{strings.Repeat("a", 63) + "\xff", strings.Repeat("a", 63) + "\xfe"},
+}
+
+// TestEventKeysAreCanonical: tag keys, extra keys, and slog attribute
+// keys that differ only in invalid UTF-8 do not drop the event. The
+// event arrives with one key, and the last one in option order wins.
+// The same holds for a held count event, and the dropped counter does
+// not change.
+func TestEventKeysAreCanonical(t *testing.T) {
+	captures := []struct {
+		name  string
+		field string
+		send  func(a, b string)
+	}{
+		{"WithTag", "tags", func(a, b string) {
+			CaptureMessage("keys", WithTag(a, "first"), WithTag(b, "second"))
+		}},
+		{"WithExtra", "extra", func(a, b string) {
+			CaptureMessage("keys", WithExtra(a, "first"), WithExtra(b, "second"))
+		}},
+		{"SlogHandler", "extra", func(a, b string) {
+			slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil))).Error("keys", a, "first", b, "second")
+		}},
+	}
+	for _, cp := range captures {
+		for i, pair := range keyCollisions {
+			for _, held := range []bool{false, true} {
+				name := cp.name + "/" + strconv.Itoa(i) + "/whole"
+				n := 1
+				if held {
+					name = cp.name + "/" + strconv.Itoa(i) + "/held"
+					n = fullPerWindow + 3
+				}
+				t.Run(name, func(t *testing.T) {
+					is := is.New(t)
+					resetActive(t)
+					srv := newSockeyeServer(t)
+					defer srv.Close()
+					is.NoErr(Init(Options{SockeyeDSN: testSockeyeDSN, HTTPClient: rewriteTransport(srv.URL), Clock: newTestClock().Now}))
+					c := active.Load()
+
+					for range n {
+						cp.send(pair[0], pair[1])
+					}
+					Flush(5 * time.Second)
+
+					total := 0
+					for _, r := range srv.requests() {
+						f, _ := r.ev[cp.field].(map[string]any)
+						delete(f, "log")
+						is.Eq(len(f), 1)
+						for _, v := range f {
+							is.Eq(v, "second")
+						}
+						count, _ := r.ev["count"].(float64)
+						total += max(int(count), 1)
+					}
+					is.Eq(total, n)
+					is.Eq(c.dropped.Load(), int64(0))
+				})
+			}
+		}
+	}
+}
+
+// TestEventKey: eventKey makes a key valid UTF-8 and cuts it to
+// maxKeyBytes at a rune boundary. A valid key within the limit stays.
+func TestEventKey(t *testing.T) {
+	is := is.New(t)
+	is.Eq(eventKey("request_id"), "request_id")
+	is.Eq(eventKey("naïve"), "naïve")
+	is.Eq(eventKey("k\xff"), "k\uFFFD")
+	is.Eq(eventKey("k\xff\xfe"), eventKey("k\xfd"))
+	is.Eq(eventKey(strings.Repeat("a", 100)), strings.Repeat("a", maxKeyBytes))
+	is.Eq(eventKey(strings.Repeat("a", 63)+"\xff"), strings.Repeat("a", 63))
+	for _, s := range []string{strings.Repeat("\xff", 1000), strings.Repeat("\xffa", 1000), strings.Repeat("é", 100)} {
+		k := eventKey(s)
+		is.True(len(k) <= maxKeyBytes)
+		is.True(strings.ToValidUTF8(k, "") == k)
+	}
+}
+
+// samplingClient returns a client with no worker, for a test that
+// calls send. A nil journal and a breaker pushed an hour out make
+// post drop each event, as an outage does.
+func samplingClient(journal io.Writer, clock *testClock) *client {
+	c := &client{clock: clock.Now}
+	if journal != nil {
+		c.journal = journal
+	} else {
+		c.openUntil = clock.Now().Add(time.Hour)
+	}
+	return c
+}
+
+// countWriter is a journal writer that adds up the events its lines
+// carry, and keeps no line. A count event adds its count. Any event
+// adds the value of extra.dropped.
+type countWriter struct {
+	t     *testing.T
+	total int
+}
+
+func (w *countWriter) Write(b []byte) (int, error) {
+	w.t.Helper()
+	body, ok := strings.CutPrefix(strings.TrimSuffix(string(b), "\n"), journalPrefix)
+	if !ok {
+		w.t.Fatalf("journal line has no prefix: %q", b)
+	}
+	var e event
+	if err := json.Unmarshal([]byte(body), &e); err != nil {
+		w.t.Fatal(err)
+	}
+	w.total += max(e.Count, 1)
+	if d, ok := e.Extra["dropped"]; ok {
+		n, err := strconv.Atoi(string(d))
+		if err != nil {
+			w.t.Fatal(err)
+		}
+		w.total += n
+	}
+	return len(b), nil
+}
+
+// TestBucketMapIsBounded: a flood of distinct errors in one window
+// leaves the bucket map at maxBuckets entries or fewer, and the held
+// events at maxHeldEvents or fewer. It keeps little heap, and it loses
+// no count: each event is in a count, in extra.dropped, or in the
+// dropped counter. It runs once with the journal sink and once with an
+// open breaker.
+func TestBucketMapIsBounded(t *testing.T) {
+	for _, sink := range []string{"journal", "open breaker"} {
+		t.Run(sink, func(t *testing.T) {
+			is := is.New(t)
+			clock := newTestClock()
+			out := &countWriter{t: t}
+			var c *client
+			if sink == "journal" {
+				c = samplingClient(out, clock)
+			} else {
+				c = samplingClient(nil, clock)
+			}
+			sent := 0
+
+			// Errors that go past their limit, more than the held cap.
+			for i := range maxHeldEvents + 20 {
+				for range fullPerWindow + 2 {
+					sendNow(c, "repeat "+strings.Repeat("x", i+1)+"!")
+					sent++
+				}
+			}
+
+			// A flood of distinct 4 KB errors.
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			for i := range 3 * maxBuckets {
+				sendNow(c, strings.Repeat(string(rune('a'+i%26)), 2000)+strconv.Itoa(i)+strings.Repeat("-", 2000)+"x"+strings.Repeat(string(rune('A'+i%25)), i%7+1))
+				sent++
+			}
+			runtime.GC()
+			runtime.ReadMemStats(&after)
+
+			c.breakerMu.Lock()
+			is.True(len(c.buckets) <= maxBuckets)
+			held := 0
+			for _, bk := range c.buckets {
+				if bk.last != nil {
+					held++
+				}
+			}
+			c.breakerMu.Unlock()
+			is.True(held <= maxHeldEvents)
+			is.True(after.HeapAlloc < before.HeapAlloc+2<<20)
+
+			c.flushCounts(true)
+			runtime.KeepAlive(c)
+
+			accounted := int(c.dropped.Load()) + out.total
+			is.Eq(accounted, sent)
+		})
+	}
+}
+
+// TestBucketOverflowSamplesLikeAnyBucket: past maxBuckets, new errors
+// share one overflow bucket. It sends fullPerWindow events whole in a
+// window, and it counts the rest. Errors that already have a bucket
+// keep their own allowance.
+func TestBucketOverflowSamplesLikeAnyBucket(t *testing.T) {
+	is := is.New(t)
+	clock := newTestClock()
+	var out bytes.Buffer
+	c := samplingClient(&out, clock)
+
+	// The map holds maxBuckets entries with the overflow bucket, so
+	// maxBuckets-1 errors have their own bucket.
+	for i := range maxBuckets - 1 {
+		sendNow(c, "known "+strings.Repeat("k", i+1)+"!")
+	}
+	lines := func() int { return strings.Count(out.String(), "\n") }
+	base := lines()
+
+	// New errors past the cap: fullPerWindow whole, then counts.
+	for i := range fullPerWindow + 5 {
+		sendNow(c, "new "+strings.Repeat("n", i+1)+"!")
+	}
+	is.Eq(lines()-base, fullPerWindow+1) // 10 whole and the first count
+
+	// An error that has a bucket sends whole again.
+	before := lines()
+	sendNow(c, "known k!")
+	is.Eq(lines()-before, 1)
+
+	c.breakerMu.Lock()
+	defer c.breakerMu.Unlock()
+	is.True(len(c.buckets) <= maxBuckets)
+}
+
 // sendNow runs a message event through c.send on the test goroutine, so
 // a test of sampling or of the breaker reads the result at once.
 func sendNow(c *client, msg string, opts ...Option) {
@@ -526,8 +765,9 @@ func BenchmarkFingerprintKey(b *testing.B) {
 	for _, c := range cases {
 		b.Run(c.name, func(b *testing.B) {
 			b.ReportAllocs()
+			seed := maphash.MakeSeed()
 			for b.Loop() {
-				fingerprintKey(c.e)
+				fingerprintKey(seed, c.e)
 			}
 		})
 	}
@@ -552,7 +792,7 @@ func BenchmarkEncodeEvent(b *testing.B) {
 // storm runs this path for each event.
 func BenchmarkSendHeld(b *testing.B) {
 	clock := newTestClock()
-	c := &client{clock: clock.Now, httpClient: acceptClient(), buckets: map[string]*bucket{}}
+	c := &client{clock: clock.Now, httpClient: acceptClient()}
 	e := benchEvent(b)
 	for range fullPerWindow + 1 {
 		c.send(e)
@@ -568,12 +808,14 @@ func BenchmarkSendHeld(b *testing.B) {
 func TestWriteNoDigitsMatchesRegexp(t *testing.T) {
 	is := is.New(t)
 	re := regexp.MustCompile(`[0-9]+`)
+	seed := maphash.MakeSeed()
 	for _, s := range []string{
 		"", "7", "abc", "job 17 failed", "0042abc99", "x1y22z333",
 		"bad \xff 12 byte", "١٢٣ arabic digits stay", "a-1.5e10",
 	} {
-		var b strings.Builder
-		writeNoDigits(&b, s)
-		is.Eq(b.String(), re.ReplaceAllString(s, "?"))
+		var h maphash.Hash
+		h.SetSeed(seed)
+		writeNoDigits(&h, s)
+		is.Eq(h.Sum64(), maphash.String(seed, re.ReplaceAllString(s, "?")))
 	}
 }

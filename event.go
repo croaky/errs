@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 var stackErrType = reflect.TypeFor[*stackErr]()
@@ -109,6 +110,20 @@ func cut(s string, n int) string {
 		end--
 	}
 	return strings.Clone(s[:end])
+}
+
+// eventKey makes a tag or extra key canonical. It cuts the key to
+// maxKeyBytes, replaces each run of invalid UTF-8 with U+FFFD, and cuts
+// again, because a replacement is longer than the byte it replaces.
+// The wire encoder also replaces invalid bytes, but it refuses two map
+// keys that become one JSON name. After eventKey, the event holds one
+// entry for them. The first cut bounds the work for a long key.
+func eventKey(s string) string {
+	k := cut(s, maxKeyBytes)
+	if utf8.ValidString(k) {
+		return k
+	}
+	return cut(strings.ToValidUTF8(k, "\uFFFD"), maxKeyBytes)
 }
 
 // encodeExtra encodes one extra value as JSON on the caller goroutine,

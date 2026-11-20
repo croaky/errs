@@ -180,7 +180,7 @@ func TestBucketHoldsNoEventAfterItsCount(t *testing.T) {
 		sendNow(c, "held")
 	}
 	c.breakerMu.Lock()
-	bk := c.buckets[fingerprintKey(&event{Message: "held"})]
+	bk := c.buckets[fingerprintKey(c.seed, &event{Message: "held"})]
 	is.True(bk.last != nil) // the 12th event waits for its count
 	c.breakerMu.Unlock()
 

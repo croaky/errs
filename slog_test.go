@@ -168,7 +168,7 @@ func TestSlogHandlerQueuedEventsHoldNoLongMessage(t *testing.T) {
 	is := is.New(t)
 	resetActive(t)
 	t.Cleanup(func() { active.Store(nil) })
-	c := &client{queue: make(chan *event, 8), buckets: map[string]*bucket{}}
+	c := &client{queue: make(chan *event, 8)}
 	active.Store(c) // no worker, so the events stay in the queue
 	log := slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil)))
 

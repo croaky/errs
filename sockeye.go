@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"hash/maphash"
 	"maps"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -21,6 +21,17 @@ const (
 	countEvery = 10 * time.Second
 	// breakerFailures failed sends in a row open the breaker.
 	breakerFailures = 5
+	// maxBuckets bounds the sampling map in items. A bucket is small and
+	// its key is 8 bytes, so the map stays under about 100 KiB. The
+	// overflow bucket counts toward it.
+	maxBuckets = 1024
+	// maxHeldEvents bounds the held events in bytes. An event is under
+	// about 200 KiB, so at most 32 of them keep the worker under about
+	// 6.4 MiB. A bucket with no free slot still counts its events.
+	maxHeldEvents = 32
+	// overflowKey names the one bucket that errors share once the map
+	// holds maxBuckets entries. fingerprintKey never returns it.
+	overflowKey = 0
 )
 
 // breakerPauses is the schedule of pauses when consecutive sends fail.
@@ -69,16 +80,31 @@ type bucket struct {
 
 // send sends an event whole while its error is under the limit. Past
 // the limit, it holds the event and sends one count event every
-// countEvery, so the group total stays exact.
+// countEvery, so the group total stays exact. The worker is the only
+// caller. Once the map holds maxBuckets entries, a new error goes to
+// the overflow bucket, which samples and counts like any other bucket.
+// A bucket holds its latest event only while fewer than maxHeldEvents
+// buckets do. A bucket with no slot counts its events, and the next
+// event of the bucket carries the count.
 func (c *client) send(e *event) {
 	now := c.now()
-	key := fingerprintKey(e)
+	if c.buckets == nil {
+		c.buckets = map[uint64]*bucket{}
+		c.seed = maphash.MakeSeed()
+	}
+	key := fingerprintKey(c.seed, e)
 
 	c.breakerMu.Lock()
 	bk := c.buckets[key]
 	if bk == nil {
-		bk = &bucket{windowStart: now}
-		c.buckets[key] = bk
+		if len(c.buckets) >= maxBuckets-1 {
+			key = overflowKey
+			bk = c.buckets[key]
+		}
+		if bk == nil {
+			bk = &bucket{windowStart: now}
+			c.buckets[key] = bk
+		}
 	}
 	if now.Sub(bk.windowStart) >= sampleWindow {
 		bk.windowStart, bk.sent = now, 0
@@ -88,40 +114,74 @@ func (c *client) send(e *event) {
 		bk.sent++
 	} else {
 		bk.held++
-		bk.last = e
 		if now.Sub(bk.lastCount) < countEvery {
+			c.hold(bk, e)
 			c.breakerMu.Unlock()
 			return
 		}
-		count, bk.held, bk.lastCount, bk.last = bk.held, 0, now, nil
+		count, bk.held, bk.lastCount = bk.held, 0, now
+		c.freeHeld(bk)
 	}
 	c.breakerMu.Unlock()
 
 	c.post(e, count)
 }
 
+// hold keeps e as the latest held event of bk, if bk has one already
+// or if fewer than maxHeldEvents buckets have one. The caller holds
+// breakerMu.
+func (c *client) hold(bk *bucket, e *event) {
+	if bk.last == nil {
+		if c.heldEvents >= maxHeldEvents {
+			return
+		}
+		c.heldEvents++
+	}
+	bk.last = e
+}
+
+// freeHeld drops the held event of bk and frees its slot. The caller
+// holds breakerMu.
+func (c *client) freeHeld(bk *bucket) {
+	if bk.last != nil {
+		bk.last = nil
+		c.heldEvents--
+	}
+}
+
 // flushCounts sends the held counts that are due. With all set, it
 // sends every held count, for shutdown. It also forgets errors that
-// have been quiet for a window.
+// have been quiet for a window. A bucket with no held event has no
+// event to carry its count, so the count goes to the dropped counter,
+// and the next event sent reports it.
 func (c *client) flushCounts(all bool) {
 	now := c.now()
 	type pending struct {
 		e     *event
 		count int
 	}
-	var due []pending
+	var (
+		due  []pending
+		lost int
+	)
 
 	c.breakerMu.Lock()
 	for key, bk := range c.buckets {
 		if bk.held > 0 && (all || now.Sub(bk.lastCount) >= countEvery) {
-			due = append(due, pending{bk.last, bk.held})
-			bk.held, bk.lastCount, bk.last = 0, now, nil
+			if bk.last != nil {
+				due = append(due, pending{bk.last, bk.held})
+			} else {
+				lost += bk.held
+			}
+			bk.held, bk.lastCount = 0, now
+			c.freeHeld(bk)
 		}
 		if bk.held == 0 && now.Sub(bk.windowStart) >= sampleWindow && now.Sub(bk.lastCount) >= sampleWindow {
 			delete(c.buckets, key)
 		}
 	}
 	c.breakerMu.Unlock()
+	c.dropped.Add(int64(lost))
 
 	for _, p := range due {
 		c.post(p.e, p.count)
@@ -205,86 +265,80 @@ func (c *client) record(ok bool, now time.Time) {
 // fingerprintKey names the error an event belongs to, for sampling.
 // It follows the order sockeye groups by: the event's own
 // fingerprint, else the type and the top three in-app frames, else the
-// type and the message with its digits replaced. The worker calls it
-// for each event, so it builds the key in one strings.Builder.
-func fingerprintKey(e *event) string {
-	var b strings.Builder
-	if len(e.Fingerprint) > 0 {
-		n := len("own:") + len(e.Fingerprint) - 1
-		for _, p := range e.Fingerprint {
-			n += len(p)
-		}
-		b.Grow(n)
-		b.WriteString("own:")
+// type and the message with its digits replaced. It returns an 8-byte
+// hash of that text, whatever its length, so a key holds no caller
+// text. The seed is random for each client, so a caller cannot craft
+// two texts with one hash. A real collision makes two errors share one
+// sampling allowance. It loses no count. The worker calls it for each
+// event, so it hashes in place and builds no string.
+func fingerprintKey(seed maphash.Seed, e *event) uint64 {
+	var h maphash.Hash
+	h.SetSeed(seed)
+	switch {
+	case len(e.Fingerprint) > 0:
+		h.WriteString("own:")
 		for i, p := range e.Fingerprint {
 			if i > 0 {
-				b.WriteByte(0)
+				h.WriteByte(0)
 			}
-			b.WriteString(p)
+			h.WriteString(p)
 		}
-		return b.String()
-	}
-	if e.Exception != nil && len(e.Exception.Values) > 0 {
+	case e.Exception != nil && len(e.Exception.Values) > 0:
 		v := e.Exception.Values[len(e.Exception.Values)-1]
 		var (
 			top  [3]*frame
 			nTop int
 		)
-		n := len("frames:") + len(v.Type)
 		if v.Stacktrace != nil {
 			frames := v.Stacktrace.Frames
 			for i := len(frames) - 1; i >= 0 && nTop < len(top); i-- {
 				if f := &frames[i]; f.InApp {
 					top[nTop] = f
 					nTop++
-					n += 2 + len(f.Function) + len(f.Filename)
 				}
 			}
 		}
 		if nTop > 0 {
-			b.Grow(n)
-			b.WriteString("frames:")
-			b.WriteString(v.Type)
+			h.WriteString("frames:")
+			h.WriteString(v.Type)
 			for _, f := range top[:nTop] {
-				b.WriteByte(0)
-				b.WriteString(f.Function)
-				b.WriteByte('@')
-				b.WriteString(f.Filename)
+				h.WriteByte(0)
+				h.WriteString(f.Function)
+				h.WriteByte('@')
+				h.WriteString(f.Filename)
 			}
-			return b.String()
+			break
 		}
-		b.Grow(len("type:") + len(v.Type) + 1 + len(v.Value))
-		b.WriteString("type:")
-		b.WriteString(v.Type)
-		b.WriteByte(0)
-		writeNoDigits(&b, v.Value)
-		return b.String()
+		h.WriteString("type:")
+		h.WriteString(v.Type)
+		h.WriteByte(0)
+		writeNoDigits(&h, v.Value)
+	case e.Message != "":
+		h.WriteString("message:")
+		writeNoDigits(&h, e.Message)
 	}
-	if e.Message != "" {
-		b.Grow(len("message:") + len(e.Message))
-		b.WriteString("message:")
-		writeNoDigits(&b, e.Message)
-		return b.String()
+	if key := h.Sum64(); key != overflowKey {
+		return key
 	}
-	return ""
+	return overflowKey + 1
 }
 
-// writeNoDigits writes s to b with each run of ASCII digits replaced
+// writeNoDigits writes s to h with each run of ASCII digits replaced
 // by one "?". It gives the result of the regexp [0-9]+ with
 // ReplaceAllString, at a small part of the cost. Other bytes, invalid
 // UTF-8 too, go through unchanged.
-func writeNoDigits(b *strings.Builder, s string) {
+func writeNoDigits(h *maphash.Hash, s string) {
 	for i := 0; i < len(s); {
 		if !isDigit(s[i]) {
 			j := i + 1
 			for j < len(s) && !isDigit(s[j]) {
 				j++
 			}
-			b.WriteString(s[i:j])
+			h.WriteString(s[i:j])
 			i = j
 			continue
 		}
-		b.WriteByte('?')
+		h.WriteByte('?')
 		for i < len(s) && isDigit(s[i]) {
 			i++
 		}

@@ -12,21 +12,18 @@ this file while a plan or an open finding remains.
 The threat model puts the host process first, then the DSN key, then
 the event text. The plans follow that order.
 
-1. `001-canonical-capture-shape.md`: make tag and extra keys valid
-   UTF-8 at capture, and bound the sampling bucket map in items and
-   bytes.
+Plan `001` landed. Its number stays unused, so the other file names
+stay the same.
+
 2. `002-pin-requests-to-endpoint.md`: send each request only to
    `dsn.endpoint` or `dsn.perfEndpoint`, and count a `3xx` as a failed
    send.
 3. `003-slog-values-as-json.md`: encode slog attribute values with the
    JSON encoder, not with `fmt`.
 
-Plan `001` edits `errs.go` setters, `slog.go` `captureRecord`, and
-`sockeye.go`. Plan `002` edits `errs.go` `Init` and `perf.go`. Plan
-`003` edits `slog.go` `attrText` and `README.md`. The three plans edit
-different functions, so they can run in parallel. Plans `001` and
-`003` edit functions next to each other in `slog.go`, so the second
-one to land rebases.
+Plan `002` edits `errs.go` `Init` and `perf.go`. Plan `003` edits
+`slog.go` `attrText` and `README.md`. The two plans edit different
+functions, so they can run in parallel.
 
 ## Security findings
 
@@ -47,11 +44,18 @@ Each finding below was scanned at `07a8a84`. A probe through the
 public API reproduced each one at that commit.
 
 - `find_01VLctdCqkFe3FrVemjNMPBV` (medium, the sampling bucket map has
-  no item or byte bound): `001`. This finding follows
-  `find_01QKxN2TpQgJtes8BYj8okzF`, which `36f754c` fixed for growth
-  over the life of the process.
+  no item or byte bound): no plan yet. Part (1), the bound in items
+  and bytes, landed in the change that deleted plan `001`. Part (2)
+  stays open: one call site can still make many keys, because
+  `writeNoDigits` and `titleFromMessage` split one site by its message
+  text. A fix must group by frames and ignore the message when frames
+  exist. sockeye groups by the same rule, so sockeye must change with
+  it. Write a plan after the owner decides the grouping. This finding
+  follows `find_01QKxN2TpQgJtes8BYj8okzF`, which `36f754c` fixed for
+  growth over the life of the process.
 - `find_01SCtdUmkWvecg3YEyhaU9Rt` (medium, keys that differ only in
-  invalid UTF-8 drop the event): `001`.
+  invalid UTF-8 drop the event): fixed in the change that deleted plan
+  `001`. Run `claudesec resolve` after the rollout below.
 - `find_01VcuEW9LtaXDRWn6CKcMsLs` (medium, the default client follows
   redirects with the key): `002`.
 - `find_01DvC4sWG6qxuswqAMFRSsAc` (low, `SlogHandler` formats values
@@ -125,4 +129,4 @@ Accepted risks:
   request. The operator chose the scheme. This statement is new, and
   `fa7a39e` did not have it.
 
-None of the four open findings fits an accepted risk.
+None of the open findings fits an accepted risk.

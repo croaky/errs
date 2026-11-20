@@ -101,6 +101,12 @@ The sockeye path protects both ends of the connection:
   that, the client sends one event every 10 seconds with a `count` of
   the events it held back, so the group total stays exact. `Flush`
   sends the held counts.
+- The client tracks at most 1,024 errors at one time. A new error past
+  that shares one overflow allowance of 10 whole events in a minute,
+  and the rest are counted. The client keeps the latest held event for
+  at most 32 errors at one time, which is under about 6.4 MiB. Another
+  error counts its held events, and its next event carries the count.
+  If no next event comes, the count goes to the dropped counter.
 - After 5 failed sends in a row, the client stops sending. It pauses
   for 30 seconds, then 1 minute, 2 minutes, 5 minutes, and 10 minutes
   on consecutive failures. A success closes the breaker.
@@ -112,6 +118,9 @@ The sockeye path protects both ends of the connection:
   key past 64 bytes, a tag value past 1 KiB, a fingerprint part past
   256 bytes, and a message or error text past 8 KiB. An extra whose
   JSON is past 2 KiB becomes a note that gives its size.
+- The client replaces each run of invalid UTF-8 in a tag or extra key
+  with U+FFFD. Keys that then match are one key, and the last one in
+  option order wins.
 - The capture call encodes each extra before it returns, so the caller
   can change a map or a slice after it passes it to `WithExtra`.
 

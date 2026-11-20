@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json/jsontext"
 	"fmt"
+	"hash/maphash"
 	"io"
 	"log"
 	"net/http"
@@ -78,10 +79,12 @@ type Option func(*event)
 
 // WithTag attaches a key-value tag to the event. An event keeps its
 // first maxTags tags. The client cuts a key past maxKeyBytes and a
-// value past maxTagBytes.
+// value past maxTagBytes. It replaces each run of invalid UTF-8 in a
+// key with U+FFFD, so keys that differ only in invalid bytes are one
+// tag, and the last one wins.
 func WithTag(key, value string) Option {
 	return func(e *event) {
-		k := cut(key, maxKeyBytes)
+		k := eventKey(key)
 		if _, ok := e.Tags[k]; !ok && len(e.Tags) >= maxTags {
 			return
 		}
@@ -95,10 +98,11 @@ func WithTag(key, value string) Option {
 // WithExtra attaches structured metadata to the event. The capture
 // call encodes value as JSON before it returns, so the caller can
 // change value afterward. An event keeps its first maxExtras extras.
+// A key follows the rules of WithTag.
 // See encodeExtra for a value that is too large or does not encode.
 func WithExtra(key string, value any) Option {
 	return func(e *event) {
-		k := cut(key, maxKeyBytes)
+		k := eventKey(key)
 		if _, ok := e.Extra[k]; !ok && len(e.Extra) >= maxExtras {
 			return
 		}
@@ -152,7 +156,13 @@ type client struct {
 	dropped atomic.Int64
 
 	breakerMu sync.Mutex
-	buckets   map[string]*bucket
+	buckets   map[uint64]*bucket
+	// heldEvents counts the buckets that keep a held event. It stays at
+	// maxHeldEvents or fewer.
+	heldEvents int
+	// seed keys the hash of fingerprintKey. The worker makes it with
+	// buckets, on the first send.
+	seed      maphash.Seed
 	failures  int
 	openUntil time.Time
 
@@ -225,7 +235,6 @@ func Init(opts Options) error {
 		httpClient:   hc,
 		captureUsage: opts.CaptureUsage,
 		queue:        make(chan *event, queueLimit),
-		buckets:      map[string]*bucket{},
 	}
 	c.wg.Add(1)
 	go c.worker()
