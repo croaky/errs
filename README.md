@@ -37,9 +37,11 @@ slog.SetDefault(slog.New(errs.SlogHandler(slog.Default().Handler())))
 ```
 
 The handler sends the record attributes as extras. It resolves each
-`slog.LogValuer` first and encodes non-scalar values as JSON. Events
-honor `LogValuer`, `MarshalJSON`, `MarshalText`, `json` tags, and field
-visibility. Events do not honor the wrapped handler's `ReplaceAttr`.
+`slog.LogValuer` first and encodes non-scalar values as JSON, matching
+`slog.JSONHandler`. Events honor `LogValuer`, `MarshalJSON`,
+`MarshalText`, `json` tags, and field visibility. Events ignore
+`fmt.Stringer` and `fmt.Formatter`, follow reachable exported pointers,
+and do not honor the wrapped handler's `ReplaceAttr`.
 
 An empty `Release` reads the commit from the Go build info.
 

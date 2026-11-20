@@ -15,9 +15,11 @@ import (
 // exception, wrapped with the record message. Any other record is sent
 // as a message. The record message becomes the "log" tag, and the other
 // attributes become extras. The handler resolves each slog.LogValuer
-// first and encodes non-scalar values as JSON, so events honor
-// LogValuer, MarshalJSON, MarshalText, json tags, and field visibility.
-// The ReplaceAttr function of next does not apply to events. With no
+// first and encodes non-scalar values as JSON, matching
+// slog.JSONHandler. Events honor LogValuer, MarshalJSON, MarshalText,
+// json tags, and field visibility. Events ignore fmt.Stringer and
+// fmt.Formatter, and JSON follows reachable exported pointers. The
+// ReplaceAttr function of next does not apply to events. With no
 // client started, the handler only calls next.
 func SlogHandler(next slog.Handler) slog.Handler {
 	return slogHandler{next}
