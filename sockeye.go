@@ -264,13 +264,15 @@ func (c *client) record(ok bool, now time.Time) {
 
 // fingerprintKey names the error an event belongs to, for sampling.
 // It follows the order sockeye groups by: the event's own
-// fingerprint, else the type and the top three in-app frames, else the
-// type and the message with its digits replaced. It returns an 8-byte
-// hash of that text, whatever its length, so a key holds no caller
-// text. The seed is random for each client, so a caller cannot craft
-// two texts with one hash. A real collision makes two errors share one
-// sampling allowance. It loses no count. The worker calls it for each
-// event, so it hashes in place and builds no string.
+// fingerprint, else the top three in-app frames alone, else the type
+// and the message with its digits replaced. Dropping the type and
+// message when in-app frames exist keeps one call site in one bucket
+// even when caller text varies. It returns an 8-byte hash of that
+// text, whatever its length, so a key holds no caller text. The seed
+// is random for each client, so a caller cannot craft two texts with
+// one hash. A real collision makes two errors share one sampling
+// allowance. It loses no count. The worker calls it for each event, so
+// it hashes in place and builds no string.
 func fingerprintKey(seed maphash.Seed, e *event) uint64 {
 	var h maphash.Hash
 	h.SetSeed(seed)
@@ -283,44 +285,60 @@ func fingerprintKey(seed maphash.Seed, e *event) uint64 {
 			}
 			h.WriteString(p)
 		}
-	case e.Exception != nil && len(e.Exception.Values) > 0:
-		v := e.Exception.Values[len(e.Exception.Values)-1]
-		var (
-			top  [3]*frame
-			nTop int
-		)
-		if v.Stacktrace != nil {
-			frames := v.Stacktrace.Frames
+	default:
+		if frames := eventFrames(e); len(frames) > 0 {
+			var (
+				top  [3]*frame
+				nTop int
+			)
 			for i := len(frames) - 1; i >= 0 && nTop < len(top); i-- {
 				if f := &frames[i]; f.InApp {
 					top[nTop] = f
 					nTop++
 				}
 			}
-		}
-		if nTop > 0 {
-			h.WriteString("frames:")
-			h.WriteString(v.Type)
-			for _, f := range top[:nTop] {
-				h.WriteByte(0)
-				h.WriteString(f.Function)
-				h.WriteByte('@')
-				h.WriteString(f.Filename)
+			if nTop > 0 {
+				h.WriteString("frames:")
+				for i, f := range top[:nTop] {
+					if i > 0 {
+						h.WriteByte(0)
+					}
+					h.WriteString(f.Function)
+					h.WriteByte('@')
+					h.WriteString(f.Filename)
+				}
+				break
 			}
-			break
 		}
-		h.WriteString("type:")
-		h.WriteString(v.Type)
-		h.WriteByte(0)
-		writeNoDigits(&h, v.Value)
-	case e.Message != "":
-		h.WriteString("message:")
-		writeNoDigits(&h, e.Message)
+		switch {
+		case e.Exception != nil && len(e.Exception.Values) > 0:
+			v := e.Exception.Values[len(e.Exception.Values)-1]
+			h.WriteString("type:")
+			h.WriteString(v.Type)
+			h.WriteByte(0)
+			writeNoDigits(&h, v.Value)
+		case e.Message != "":
+			h.WriteString("message:")
+			writeNoDigits(&h, e.Message)
+		}
 	}
 	if key := h.Sum64(); key != overflowKey {
 		return key
 	}
 	return overflowKey + 1
+}
+
+func eventFrames(e *event) []frame {
+	if e.Exception != nil && len(e.Exception.Values) > 0 {
+		v := e.Exception.Values[len(e.Exception.Values)-1]
+		if v.Stacktrace != nil && len(v.Stacktrace.Frames) > 0 {
+			return v.Stacktrace.Frames
+		}
+	}
+	if e.Stacktrace != nil {
+		return e.Stacktrace.Frames
+	}
+	return nil
 }
 
 // writeNoDigits writes s to h with each run of ASCII digits replaced

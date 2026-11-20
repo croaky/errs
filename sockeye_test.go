@@ -403,9 +403,17 @@ func TestFingerprintKey(t *testing.T) {
 	is.True(key(framed("f")) != key(framed("g")))
 
 	// The text that each key hashes, so a change to its form shows in a
-	// test.
+	// test. Framed events group by frames alone, ignoring Type and Message.
 	is.Eq(key(a), maphash.String(seed, "message:job ? failed"))
-	is.Eq(key(framed("f")), maphash.String(seed, "frames:T\x00f@a.go"))
+	is.Eq(key(framed("f")), maphash.String(seed, "frames:f@a.go"))
+	diffType := framed("f")
+	diffType.Exception.Values[0].Type = "other caller prefix"
+	is.Eq(key(diffType), key(framed("f")))
+	msgFramed := &event{
+		Message:    "different message",
+		Stacktrace: &stacktrace{Frames: []frame{{Function: "f", Filename: "a.go", InApp: true}}},
+	}
+	is.Eq(key(msgFramed), key(framed("f")))
 	deep := framed("f")
 	deep.Exception.Values[0].Stacktrace.Frames = []frame{
 		{Function: "a", Filename: "a.go", InApp: true},
@@ -414,7 +422,7 @@ func TestFingerprintKey(t *testing.T) {
 		{Function: "c", Filename: "c.go", InApp: true},
 		{Function: "d", Filename: "d.go", InApp: true},
 	}
-	is.Eq(key(deep), maphash.String(seed, "frames:T\x00d@d.go\x00c@c.go\x00b@b.go"))
+	is.Eq(key(deep), maphash.String(seed, "frames:d@d.go\x00c@c.go\x00b@b.go"))
 	deep.Exception.Values[0].Stacktrace = nil
 	is.Eq(key(deep), maphash.String(seed, "type:T\x00v ?"))
 	is.Eq(key(&event{}), maphash.String(seed, ""))
@@ -729,6 +737,62 @@ func TestBucketOverflowSamplesLikeAnyBucket(t *testing.T) {
 	c.breakerMu.Lock()
 	defer c.breakerMu.Unlock()
 	is.True(len(c.buckets) <= maxBuckets)
+}
+
+// TestOneCallSiteProducesOneSamplingBucket: caller-controlled message or
+// plain-error text from one call site maps to one sampling bucket for
+// CaptureException, CaptureMessage, and SlogHandler. Two distinct call
+// sites map to distinct buckets.
+func TestOneCallSiteProducesOneSamplingBucket(t *testing.T) {
+	cases := []struct {
+		name string
+		call func(slug string)
+	}{
+		{"CaptureException", func(slug string) {
+			CaptureException(errors.New(slug + ": request rejected"))
+		}},
+		{"CaptureMessage", func(slug string) {
+			CaptureMessage("request rejected for " + slug)
+		}},
+		{"SlogHandler", func(slug string) {
+			slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil))).Error("request rejected for " + slug)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			is := is.New(t)
+			resetActive(t)
+			srv := newSockeyeServer(t)
+			defer srv.Close()
+			is.NoErr(Init(Options{
+				SockeyeDSN:  testSockeyeDSN,
+				HTTPClient:  rewriteTransport(srv.URL),
+				Clock:       newTestClock().Now,
+				InAppPrefix: "github.com/croaky/errs",
+			}))
+			c := active.Load()
+
+			const n = fullPerWindow + 20
+			for i := range n {
+				slug := "user-" + strings.Repeat(string(rune('a'+i%26)), i/26+1)
+				tc.call(slug)
+			}
+			Flush(5 * time.Second)
+
+			c.breakerMu.Lock()
+			buckets := len(c.buckets)
+			c.breakerMu.Unlock()
+			is.Eq(buckets, 1)
+
+			total := 0
+			for _, r := range srv.requests() {
+				cnt, _ := r.ev["count"].(float64)
+				total += max(int(cnt), 1)
+			}
+			is.Eq(total, n)
+			is.True(len(srv.requests()) < n)
+		})
+	}
 }
 
 // sendNow runs a message event through c.send on the test goroutine, so

@@ -32,6 +32,7 @@ type event struct {
 	Fingerprint []string                  `json:"fingerprint,omitempty"`
 	Message     string                    `json:"message,omitempty"`
 	Count       int                       `json:"count,omitzero"`
+	Stacktrace  *stacktrace               `json:"stacktrace,omitempty"`
 	Exception   *exceptionPayload         `json:"exception,omitempty"`
 }
 

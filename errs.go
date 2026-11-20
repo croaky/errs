@@ -283,7 +283,7 @@ func CaptureException(err error, opts ...Option) string {
 	return e.EventID
 }
 
-// CaptureMessage reports a message event.
+// CaptureMessage reports a message event with caller stack trace frames.
 func CaptureMessage(msg string, opts ...Option) string {
 	c := active.Load()
 	if c == nil {
@@ -291,6 +291,9 @@ func CaptureMessage(msg string, opts ...Option) string {
 	}
 	e := c.newEvent("info", opts)
 	e.Message = truncate(msg)
+	if frames := resolveFrames(callers(2), c.root, c.inAppPrefix); len(frames) > 0 {
+		e.Stacktrace = &stacktrace{Frames: frames}
+	}
 	c.dispatch(e)
 	return e.EventID
 }

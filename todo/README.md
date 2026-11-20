@@ -33,15 +33,13 @@ Each finding below was scanned at `07a8a84`. A probe through the
 public API reproduced each one at that commit.
 
 - `find_01VLctdCqkFe3FrVemjNMPBV` (medium, the sampling bucket map has
-  no item or byte bound): no plan yet. Part (1), the bound in items
-  and bytes, landed in the change that deleted plan `001`. Part (2)
-  stays open: one call site can still make many keys, because
-  `writeNoDigits` and `titleFromMessage` split one site by its message
-  text. A fix must group by frames and ignore the message when frames
-  exist. sockeye groups by the same rule, so sockeye must change with
-  it. Write a plan after the owner decides the grouping. This finding
-  follows `find_01QKxN2TpQgJtes8BYj8okzF`, which `36f754c` fixed for
-  growth over the life of the process.
+  no item or byte bound): fixed. Part (1), the bound in items and
+  bytes, landed in the change that deleted plan `001`. Part (2),
+  grouping framed events by frames alone and attaching caller frames
+  to `CaptureMessage`, landed together with the matching `sockeye`
+  grouping change. Run `claudesec resolve` after the rollout below.
+  This finding follows `find_01QKxN2TpQgJtes8BYj8okzF`, which `36f754c`
+  fixed for growth over the life of the process.
 - `find_01SCtdUmkWvecg3YEyhaU9Rt` (medium, keys that differ only in
   invalid UTF-8 drop the event): fixed in the change that deleted plan
   `001`. Run `claudesec resolve` after the rollout below.
