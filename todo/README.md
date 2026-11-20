@@ -12,18 +12,13 @@ this file while a plan or an open finding remains.
 The threat model puts the host process first, then the DSN key, then
 the event text. The plans follow that order.
 
-Plan `001` landed. Its number stays unused, so the other file names
-stay the same.
+Plans `001` and `002` landed. Their numbers stay unused, so the other
+file names stay the same.
 
-2. `002-pin-requests-to-endpoint.md`: send each request only to
-   `dsn.endpoint` or `dsn.perfEndpoint`, and count a `3xx` as a failed
-   send.
 3. `003-slog-values-as-json.md`: encode slog attribute values with the
    JSON encoder, not with `fmt`.
 
-Plan `002` edits `errs.go` `Init` and `perf.go`. Plan `003` edits
-`slog.go` `attrText` and `README.md`. The two plans edit different
-functions, so they can run in parallel.
+Plan `003` edits `slog.go` `attrText` and `README.md`.
 
 ## Security findings
 
@@ -57,7 +52,8 @@ public API reproduced each one at that commit.
   invalid UTF-8 drop the event): fixed in the change that deleted plan
   `001`. Run `claudesec resolve` after the rollout below.
 - `find_01VcuEW9LtaXDRWn6CKcMsLs` (medium, the default client follows
-  redirects with the key): `002`.
+  redirects with the key): fixed in the change that deleted plan `002`.
+  Run `claudesec resolve` after the rollout below.
 - `find_01DvC4sWG6qxuswqAMFRSsAc` (low, `SlogHandler` formats values
   with `fmt`): `003`. This finding follows
   `find_01HNZoye689yfFaMsVfvqaQL`, which `955f83d` fixed for

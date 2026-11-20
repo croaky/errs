@@ -60,6 +60,11 @@ type Options struct {
 	Environment string
 	Release     string
 	ServerName  string
+	// HTTPClient supplies the HTTP client for sockeye requests. Init copies
+	// the client value and overrides CheckRedirect so errs does not follow
+	// redirects. A caller's CheckRedirect does not apply, because a redirect
+	// can send the DSN key to another host. Init does not modify the caller's
+	// client value.
 	HTTPClient  *http.Client
 	InAppPrefix string
 	Clock       func() time.Time
@@ -203,9 +208,14 @@ func Init(opts Options) error {
 			return err
 		}
 	}
-	hc := opts.HTTPClient
-	if hc == nil {
-		hc = &http.Client{Timeout: 5 * time.Second}
+	var hc http.Client
+	if opts.HTTPClient != nil {
+		hc = *opts.HTTPClient
+	} else {
+		hc = http.Client{Timeout: 5 * time.Second}
+	}
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 	serverName := opts.ServerName
 	if serverName == "" {
@@ -232,7 +242,7 @@ func Init(opts Options) error {
 		root:         root,
 		inAppPrefix:  inAppPrefix,
 		clock:        opts.Clock,
-		httpClient:   hc,
+		httpClient:   &hc,
 		captureUsage: opts.CaptureUsage,
 		queue:        make(chan *event, queueLimit),
 	}

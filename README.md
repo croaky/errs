@@ -123,6 +123,10 @@ The sockeye path protects both ends of the connection:
   option order wins.
 - The capture call encodes each extra before it returns, so the caller
   can change a map or a slice after it passes it to `WithExtra`.
+- The client does not follow HTTP redirects. `Init` copies
+  `Options.HTTPClient` and ignores any caller `CheckRedirect`, because a
+  redirect can send the DSN key to another host. A `3xx` response counts
+  as a failed send, and an endpoint that moves needs a new DSN.
 
 ## Request metrics
 
