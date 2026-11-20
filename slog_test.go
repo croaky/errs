@@ -157,8 +157,209 @@ func TestSlogHandlerResolvesLogValuer(t *testing.T) {
 	is.True(!strings.Contains(string(body), "hunter2"))
 	extra := reqs[0].ev["extra"].(map[string]any)
 	is.Eq(extra["token"], "REDACTED")
-	is.Eq(extra["user"], "[password=REDACTED]")
+	is.Eq(extra["user"], map[string]any{"password": "REDACTED"})
 	is.Eq(extra["err"], "REDACTED")
+}
+
+type jsonRedacted struct {
+	raw string
+}
+
+func (jsonRedacted) MarshalJSON() ([]byte, error) { return []byte(`"REDACTED_JSON"`), nil }
+
+type textRedacted struct {
+	raw string
+}
+
+func (textRedacted) MarshalText() ([]byte, error) { return []byte("REDACTED_TEXT"), nil }
+
+type structRedacted struct {
+	Public string `json:"public"`
+	Hidden string `json:"-"`
+	priv   string
+}
+
+type unencodableSecret struct {
+	Ch     chan int
+	Hidden string `json:"-"`
+	priv   string
+}
+
+type panickingJSONSecret struct {
+	priv string
+}
+
+func (panickingJSONSecret) MarshalJSON() ([]byte, error) { panic("boom") }
+
+type panickingError struct{}
+
+func (*panickingError) Error() string { panic("error boom") }
+
+// TestSlogHandlerRedactsKindAnyValues: SlogHandler honors MarshalJSON,
+// MarshalText, json:"-", and field visibility at the top level and in
+// a group, on both the HTTP sink and the journal sink.
+func TestSlogHandlerRedactsKindAnyValues(t *testing.T) {
+	sinks := []struct {
+		name string
+		send func(t *testing.T, fn func(*slog.Logger)) (string, map[string]any)
+	}{
+		{
+			name: "http",
+			send: func(t *testing.T, fn func(*slog.Logger)) (string, map[string]any) {
+				t.Helper()
+				is := is.New(t)
+				cs := slogTestClient(t)
+				fn(slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil))))
+				Flush(time.Second)
+				ev := cs.firstEvent(t)
+				body, err := json.Marshal(ev)
+				is.NoErr(err)
+				return string(body), ev["extra"].(map[string]any)
+			},
+		},
+		{
+			name: "journal",
+			send: func(t *testing.T, fn func(*slog.Logger)) (string, map[string]any) {
+				t.Helper()
+				is := is.New(t)
+				resetActive(t)
+				var out bytes.Buffer
+				is.NoErr(Init(Options{Journal: &out}))
+				t.Cleanup(func() { Flush(time.Second) })
+				fn(slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil))))
+				Flush(time.Second)
+				line := strings.TrimSuffix(out.String(), "\n")
+				body, ok := strings.CutPrefix(line, journalPrefix)
+				is.True(ok)
+				var ev map[string]any
+				is.NoErr(json.Unmarshal([]byte(body), &ev))
+				return body, ev["extra"].(map[string]any)
+			},
+		},
+	}
+
+	for _, sink := range sinks {
+		t.Run(sink.name, func(t *testing.T) {
+			is := is.New(t)
+			body, extra := sink.send(t, func(l *slog.Logger) {
+				l.Error("auth failed",
+					"j", jsonRedacted{raw: "secret-json-top"},
+					"t", textRedacted{raw: "secret-text-top"},
+					"s", structRedacted{Public: "ok", Hidden: "secret-tag-top", priv: "secret-priv-top"},
+					slog.Group("nested",
+						"j", jsonRedacted{raw: "secret-json-grp"},
+						"t", textRedacted{raw: "secret-text-grp"},
+						"s", structRedacted{Public: "ok-grp", Hidden: "secret-tag-grp", priv: "secret-priv-grp"},
+					),
+				)
+			})
+			for _, leaked := range []string{
+				"secret-json-top", "secret-text-top", "secret-tag-top", "secret-priv-top",
+				"secret-json-grp", "secret-text-grp", "secret-tag-grp", "secret-priv-grp",
+			} {
+				is.True(!strings.Contains(body, leaked))
+			}
+			is.Eq(extra["j"], "REDACTED_JSON")
+			is.Eq(extra["t"], "REDACTED_TEXT")
+			is.Eq(extra["s"], map[string]any{"public": "ok"})
+			nested, ok := extra["nested"].(map[string]any)
+			is.True(ok)
+			is.Eq(nested["j"], "REDACTED_JSON")
+			is.Eq(nested["t"], "REDACTED_TEXT")
+			is.Eq(nested["s"], map[string]any{"public": "ok-grp"})
+		})
+	}
+}
+
+// TestSlogHandlerEncodesScalarsErrorsAndGroups: scalar attributes stay
+// strings, non-err error attributes use Error(), and groups encode as
+// JSON objects.
+func TestSlogHandlerEncodesScalarsErrorsAndGroups(t *testing.T) {
+	is := is.New(t)
+	cs := slogTestClient(t)
+	log := slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil)))
+
+	log.Error("request failed",
+		"host", "db1",
+		"attempt", 3,
+		"cause", errors.New("connection refused"),
+		slog.Group("req",
+			"method", "POST",
+			"status", 502,
+			slog.Group("inner", "ok", true),
+		),
+	)
+	Flush(time.Second)
+
+	ev := cs.firstEvent(t)
+	extra := ev["extra"].(map[string]any)
+	is.Eq(extra["host"], "db1")
+	is.Eq(extra["attempt"], "3")
+	is.Eq(extra["cause"], "connection refused")
+	req, ok := extra["req"].(map[string]any)
+	is.True(ok)
+	is.Eq(req["method"], "POST")
+	is.Eq(req["status"], "502")
+	inner, ok := req["inner"].(map[string]any)
+	is.True(ok)
+	is.Eq(inner["ok"], "true")
+}
+
+// TestSlogHandlerReplacesEncodeFailureAndPanicWithNote: a KindAny value
+// whose encode fails or panics becomes a fixed note and never falls back
+// to fmt text.
+func TestSlogHandlerReplacesEncodeFailureAndPanicWithNote(t *testing.T) {
+	is := is.New(t)
+	cs := slogTestClient(t)
+	log := slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil)))
+
+	log.Error("encode problem",
+		"bad", unencodableSecret{Ch: make(chan int), Hidden: "secret-unenc-tag", priv: "secret-unenc-priv"},
+		"panic", panickingJSONSecret{priv: "secret-panic-priv"},
+		"panic_err", (*panickingError)(nil),
+	)
+	Flush(time.Second)
+
+	ev := cs.firstEvent(t)
+	body, err := json.Marshal(ev)
+	is.NoErr(err)
+	for _, leaked := range []string{"secret-unenc-tag", "secret-unenc-priv", "secret-panic-priv"} {
+		is.True(!strings.Contains(string(body), leaked))
+	}
+	extra := ev["extra"].(map[string]any)
+	bad, ok := extra["bad"].(string)
+	is.True(ok)
+	is.True(strings.Contains(bad, "could not encode"))
+	p, ok := extra["panic"].(string)
+	is.True(ok)
+	is.True(strings.Contains(p, "panicked"))
+	pe, ok := extra["panic_err"].(string)
+	is.True(ok)
+	is.True(strings.Contains(pe, "panicked"))
+}
+
+// TestSlogHandlerExtraSizeLimitAndCallerMutation: an extra past 2 KiB
+// becomes the size note, and caller mutation of a KindAny map after
+// log.Error returns does not change the captured event.
+func TestSlogHandlerExtraSizeLimitAndCallerMutation(t *testing.T) {
+	is := is.New(t)
+	cs := slogTestClient(t)
+	log := slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil)))
+
+	m := map[string]string{"state": "before"}
+	big := struct{ Data string }{Data: strings.Repeat("x", maxExtraBytes)}
+	log.Error("bounds check", "payload", m, "big", big)
+	m["state"] = "after"
+	Flush(time.Second)
+
+	ev := cs.firstEvent(t)
+	extra := ev["extra"].(map[string]any)
+	payload, ok := extra["payload"].(map[string]any)
+	is.True(ok)
+	is.Eq(payload["state"], "before")
+	bigVal, ok := extra["big"].(string)
+	is.True(ok)
+	is.True(strings.Contains(bigVal, "the limit is"))
 }
 
 // TestSlogHandlerQueuedEventsHoldNoLongMessage: SlogHandler wraps an

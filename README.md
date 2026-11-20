@@ -37,9 +37,9 @@ slog.SetDefault(slog.New(errs.SlogHandler(slog.Default().Handler())))
 ```
 
 The handler sends the record attributes as extras. It resolves each
-`slog.LogValuer` first, so a type that redacts itself in logs is
-redacted in events too. The `ReplaceAttr` function of the wrapped
-handler does not apply to events.
+`slog.LogValuer` first and encodes non-scalar values as JSON. Events
+honor `LogValuer`, `MarshalJSON`, `MarshalText`, `json` tags, and field
+visibility. Events do not honor the wrapped handler's `ReplaceAttr`.
 
 An empty `Release` reads the commit from the Go build info.
 

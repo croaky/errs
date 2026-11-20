@@ -12,13 +12,7 @@ this file while a plan or an open finding remains.
 The threat model puts the host process first, then the DSN key, then
 the event text. The plans follow that order.
 
-Plans `001` and `002` landed. Their numbers stay unused, so the other
-file names stay the same.
-
-3. `003-slog-values-as-json.md`: encode slog attribute values with the
-   JSON encoder, not with `fmt`.
-
-Plan `003` edits `slog.go` `attrText` and `README.md`.
+Plans `001`, `002`, and `003` landed. No plan files remain.
 
 ## Security findings
 
@@ -55,7 +49,8 @@ public API reproduced each one at that commit.
   redirects with the key): fixed in the change that deleted plan `002`.
   Run `claudesec resolve` after the rollout below.
 - `find_01DvC4sWG6qxuswqAMFRSsAc` (low, `SlogHandler` formats values
-  with `fmt`): `003`. This finding follows
+  with `fmt`): fixed in the change that deleted plan `003`. Run
+  `claudesec resolve` after the rollout below. This finding follows
   `find_01HNZoye689yfFaMsVfvqaQL`, which `955f83d` fixed for
   `slog.LogValuer` only.
 
@@ -116,7 +111,7 @@ Accepted risks:
 - A reader of the sockeye error page sees the extras that the host
   sends. The readers are the operators and their agents, who also read
   the host logs. This does not cover a value that the host hides
-  through its type's redaction. `003` handles that value.
+  through its type's redaction. Plan `003` landed to handle that value.
 - The operator as the attacker, or a DSN host that the operator names
   wrong. Out of scope, except where errs itself changes the host.
 - A host `HTTPClient` with no `Timeout`. The host chose that client.
