@@ -12,12 +12,15 @@ import (
 // slog.Error call writes the log line and opens an error group.
 //
 // A record whose "err" attribute holds an error is sent as an
-// exception, wrapped with the record message. Any other record is sent
-// as a message. The record message becomes the "log" tag, and the other
-// attributes become extras. The handler resolves each slog.LogValuer
-// first and encodes non-scalar values as JSON, matching
-// slog.JSONHandler. Events honor LogValuer, MarshalJSON, MarshalText,
-// json tags, and field visibility. Events ignore fmt.Stringer and
+// exception, wrapped with the record message. The exception always uses
+// Error(), so only slog.LogValuer redacts on the "err" exception path.
+// Any other record is sent as a message. The record message becomes the
+// "log" tag, and the other attributes become extras. The handler
+// resolves each slog.LogValuer first and encodes non-scalar values as
+// JSON, matching slog.JSONHandler. Event extras honor LogValuer,
+// MarshalJSON, MarshalJSONTo, MarshalText, AppendText, json tags, and
+// field visibility, including on error values. Plain errors without a
+// marshal method use Error(). Events ignore fmt.Stringer and
 // fmt.Formatter, and JSON follows reachable exported pointers. The
 // ReplaceAttr function of next does not apply to events. With no
 // client started, the handler only calls next.
@@ -65,10 +68,10 @@ func captureRecord(r slog.Record) {
 // attrValue encodes a slog value as JSON on the caller goroutine. It
 // resolves each slog.LogValuer, in a group too. Value.Resolve stops a
 // LogValue that panics or loops. Scalar kinds stay text, as before. A
-// KindAny error uses Error(). Any other KindAny value encodes with
-// wireJSON, so MarshalJSON, MarshalText, json tags, and field
-// visibility apply. A group encodes as a JSON object with the same
-// rules for each member.
+// KindAny error without a custom marshal method uses Error(). Any other
+// KindAny value encodes with wireJSON, so MarshalJSON, MarshalJSONTo,
+// MarshalText, AppendText, json tags, and field visibility apply. A
+// group encodes as a JSON object with the same rules for each member.
 func attrValue(v slog.Value) jsontext.Value {
 	v = v.Resolve()
 	switch v.Kind() {
@@ -95,15 +98,16 @@ func attrValue(v slog.Value) jsontext.Value {
 }
 
 // encodeSlogAny encodes a KindAny slog value with wireJSON, or with
-// Error() for an error. A failure or panic becomes a fixed note so
-// hidden fields never fall back to fmt text.
+// Error() for an error that implements no JSON or text marshal method.
+// A failure or panic becomes a fixed note so hidden fields never fall
+// back to Error() or fmt text.
 func encodeSlogAny(v any) (out jsontext.Value) {
 	defer func() {
 		if r := recover(); r != nil {
 			out = noteValue("extra value panicked while it encoded")
 		}
 	}()
-	if e, ok := v.(error); ok {
+	if e, ok := v.(error); ok && !hasCustomMarshaler(v) {
 		b, err := json.Marshal(e.Error(), wireJSON)
 		if err != nil {
 			return noteValue("extra value could not encode")

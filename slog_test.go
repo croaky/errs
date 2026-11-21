@@ -2,6 +2,7 @@ package errs
 
 import (
 	"bytes"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"io"
@@ -195,6 +196,40 @@ type panickingError struct{}
 
 func (*panickingError) Error() string { panic("error boom") }
 
+type jsonRedactedErr struct{ raw string }
+
+func (e jsonRedactedErr) Error() string              { return "raw-json-err: " + e.raw }
+func (jsonRedactedErr) MarshalJSON() ([]byte, error) { return []byte(`"REDACTED_JSON_ERR"`), nil }
+
+type jsonToRedactedErr struct{ raw string }
+
+func (e jsonToRedactedErr) Error() string { return "raw-jsonto-err: " + e.raw }
+func (jsonToRedactedErr) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return enc.WriteToken(jsontext.String("REDACTED_JSONTO_ERR"))
+}
+
+type textRedactedErr struct{ raw string }
+
+func (e textRedactedErr) Error() string              { return "raw-text-err: " + e.raw }
+func (textRedactedErr) MarshalText() ([]byte, error) { return []byte("REDACTED_TEXT_ERR"), nil }
+
+type appendTextRedactedErr struct{ raw string }
+
+func (e appendTextRedactedErr) Error() string { return "raw-append-err: " + e.raw }
+func (appendTextRedactedErr) AppendText(b []byte) ([]byte, error) {
+	return append(b, "REDACTED_APPEND_ERR"...), nil
+}
+
+type failingJSONErr struct{ raw string }
+
+func (e failingJSONErr) Error() string              { return "raw-fail-json-err: " + e.raw }
+func (failingJSONErr) MarshalJSON() ([]byte, error) { return nil, errors.New("marshal failed") }
+
+type panickingJSONErr struct{ raw string }
+
+func (e panickingJSONErr) Error() string              { return "raw-panic-json-err: " + e.raw }
+func (panickingJSONErr) MarshalJSON() ([]byte, error) { panic("marshal boom") }
+
 // TestSlogHandlerRedactsKindAnyValues: SlogHandler honors MarshalJSON,
 // MarshalText, json:"-", and field visibility at the top level and in
 // a group, on both the HTTP sink and the journal sink.
@@ -267,6 +302,100 @@ func TestSlogHandlerRedactsKindAnyValues(t *testing.T) {
 			is.Eq(nested["j"], "REDACTED_JSON")
 			is.Eq(nested["t"], "REDACTED_TEXT")
 			is.Eq(nested["s"], map[string]any{"public": "ok-grp"})
+		})
+	}
+}
+
+// TestSlogHandlerRedactsErrorMarshalers: a KindAny error attribute that
+// implements MarshalJSON, MarshalJSONTo, MarshalText, or AppendText uses
+// its marshal output instead of Error(), at top level and in groups, on
+// both the HTTP sink and the journal sink. Plain errors still use
+// Error(), and a failing or panicking marshal method becomes a fixed
+// note.
+func TestSlogHandlerRedactsErrorMarshalers(t *testing.T) {
+	sinks := []struct {
+		name string
+		send func(t *testing.T, fn func(*slog.Logger)) (string, map[string]any)
+	}{
+		{
+			name: "http",
+			send: func(t *testing.T, fn func(*slog.Logger)) (string, map[string]any) {
+				t.Helper()
+				is := is.New(t)
+				cs := slogTestClient(t)
+				fn(slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil))))
+				Flush(time.Second)
+				ev := cs.firstEvent(t)
+				body, err := json.Marshal(ev)
+				is.NoErr(err)
+				return string(body), ev["extra"].(map[string]any)
+			},
+		},
+		{
+			name: "journal",
+			send: func(t *testing.T, fn func(*slog.Logger)) (string, map[string]any) {
+				t.Helper()
+				is := is.New(t)
+				resetActive(t)
+				var out bytes.Buffer
+				is.NoErr(Init(Options{Journal: &out}))
+				t.Cleanup(func() { Flush(time.Second) })
+				fn(slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil))))
+				Flush(time.Second)
+				line := strings.TrimSuffix(out.String(), "\n")
+				body, ok := strings.CutPrefix(line, journalPrefix)
+				is.True(ok)
+				var ev map[string]any
+				is.NoErr(json.Unmarshal([]byte(body), &ev))
+				return body, ev["extra"].(map[string]any)
+			},
+		},
+	}
+
+	for _, sink := range sinks {
+		t.Run(sink.name, func(t *testing.T) {
+			is := is.New(t)
+			body, extra := sink.send(t, func(l *slog.Logger) {
+				l.Error("api failed",
+					"je", jsonRedactedErr{raw: "secret-je-top"},
+					"jte", jsonToRedactedErr{raw: "secret-jte-top"},
+					"te", textRedactedErr{raw: "secret-te-top"},
+					"ae", appendTextRedactedErr{raw: "secret-ae-top"},
+					"fe", failingJSONErr{raw: "secret-fe-top"},
+					"pe", panickingJSONErr{raw: "secret-pe-top"},
+					"plain", errors.New("plain error"),
+					slog.Group("nested",
+						"je", jsonRedactedErr{raw: "secret-je-grp"},
+						"jte", jsonToRedactedErr{raw: "secret-jte-grp"},
+						"te", textRedactedErr{raw: "secret-te-grp"},
+						"ae", appendTextRedactedErr{raw: "secret-ae-grp"},
+					),
+				)
+			})
+			for _, leaked := range []string{
+				"secret-je-top", "secret-jte-top", "secret-te-top", "secret-ae-top",
+				"secret-fe-top", "secret-pe-top",
+				"secret-je-grp", "secret-jte-grp", "secret-te-grp", "secret-ae-grp",
+			} {
+				is.True(!strings.Contains(body, leaked))
+			}
+			is.Eq(extra["je"], "REDACTED_JSON_ERR")
+			is.Eq(extra["jte"], "REDACTED_JSONTO_ERR")
+			is.Eq(extra["te"], "REDACTED_TEXT_ERR")
+			is.Eq(extra["ae"], "REDACTED_APPEND_ERR")
+			is.Eq(extra["plain"], "plain error")
+			fe, ok := extra["fe"].(string)
+			is.True(ok)
+			is.True(strings.Contains(fe, "could not encode"))
+			pe, ok := extra["pe"].(string)
+			is.True(ok)
+			is.True(strings.Contains(pe, "panicked"))
+			nested, ok := extra["nested"].(map[string]any)
+			is.True(ok)
+			is.Eq(nested["je"], "REDACTED_JSON_ERR")
+			is.Eq(nested["jte"], "REDACTED_JSONTO_ERR")
+			is.Eq(nested["te"], "REDACTED_TEXT_ERR")
+			is.Eq(nested["ae"], "REDACTED_APPEND_ERR")
 		})
 	}
 }

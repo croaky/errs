@@ -38,10 +38,14 @@ slog.SetDefault(slog.New(errs.SlogHandler(slog.Default().Handler())))
 
 The handler sends the record attributes as extras. It resolves each
 `slog.LogValuer` first and encodes non-scalar values as JSON, matching
-`slog.JSONHandler`. Events honor `LogValuer`, `MarshalJSON`,
-`MarshalText`, `json` tags, and field visibility. Events ignore
-`fmt.Stringer` and `fmt.Formatter`, follow reachable exported pointers,
-and do not honor the wrapped handler's `ReplaceAttr`.
+`slog.JSONHandler`. Event extras honor `LogValuer`, `MarshalJSON`,
+`MarshalJSONTo`, `MarshalText`, `AppendText`, `json` tags, and field
+visibility, including on error values. Plain errors without a marshal
+method use `Error()`. An `"err"` attribute that resolves to an error
+becomes an exception that always uses `Error()`, so only
+`slog.LogValuer` redacts on that path. Events ignore `fmt.Stringer` and
+`fmt.Formatter`, follow reachable exported pointers, and do not honor
+the wrapped handler's `ReplaceAttr`.
 
 An empty `Release` reads the commit from the Go build info.
 
@@ -238,9 +242,10 @@ The request path protects both ends of the connection too:
 - The client posts each event as JSON to sockeye with a Bearer key.
 - An encode does not drop an event. A string with invalid UTF-8 goes
   with U+FFFD in place of each bad byte. A `time.Duration` in extra
-  goes as integer nanoseconds. An `error` extra goes as `Error()`, and
-  a non-finite float goes as its text. Any other extra value that JSON
-  cannot encode becomes a fixed note.
+  goes as integer nanoseconds. An `error` extra without a JSON or text
+  marshal method goes as `Error()`, and a non-finite float goes as its
+  text. Any other extra value that JSON cannot encode becomes a fixed
+  note.
 - An asynchronous worker queues events up to 1,000 items and drops
   events when the queue is full.
 - The sender retries transport errors and transient HTTP status codes

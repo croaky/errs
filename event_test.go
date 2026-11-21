@@ -193,6 +193,51 @@ func TestExtraEncodeFailureDoesNotLeakHiddenFields(t *testing.T) {
 	}
 }
 
+// TestEncodeExtraHonorsErrorMarshalers: WithExtra uses MarshalJSON,
+// MarshalJSONTo, MarshalText, or AppendText before Error() on an error
+// value, and replaces a failing or panicking marshal with a fixed note.
+func TestEncodeExtraHonorsErrorMarshalers(t *testing.T) {
+	is := is.New(t)
+	resetActive(t)
+	srv := newSockeyeServer(t)
+	defer srv.Close()
+	is.NoErr(Init(Options{DSN: testDSN, HTTPClient: rewriteTransport(srv.URL)}))
+	defer Flush(time.Second)
+
+	CaptureMessage("extra error marshalers",
+		WithExtra("je", jsonRedactedErr{raw: "secret-extra-je"}),
+		WithExtra("jte", jsonToRedactedErr{raw: "secret-extra-jte"}),
+		WithExtra("te", textRedactedErr{raw: "secret-extra-te"}),
+		WithExtra("ae", appendTextRedactedErr{raw: "secret-extra-ae"}),
+		WithExtra("fe", failingJSONErr{raw: "secret-extra-fe"}),
+		WithExtra("pe", panickingJSONErr{raw: "secret-extra-pe"}),
+		WithExtra("plain", errors.New("plain extra error")),
+	)
+	Flush(time.Second)
+
+	ev := srv.firstEvent(t)
+	body, err := json.Marshal(ev)
+	is.NoErr(err)
+	for _, leaked := range []string{
+		"secret-extra-je", "secret-extra-jte", "secret-extra-te",
+		"secret-extra-ae", "secret-extra-fe", "secret-extra-pe",
+	} {
+		is.True(!strings.Contains(string(body), leaked))
+	}
+	extra := ev["extra"].(map[string]any)
+	is.Eq(extra["je"], "REDACTED_JSON_ERR")
+	is.Eq(extra["jte"], "REDACTED_JSONTO_ERR")
+	is.Eq(extra["te"], "REDACTED_TEXT_ERR")
+	is.Eq(extra["ae"], "REDACTED_APPEND_ERR")
+	is.Eq(extra["plain"], "plain extra error")
+	fe, ok := extra["fe"].(string)
+	is.True(ok)
+	is.True(strings.Contains(fe, "could not encode"))
+	pe, ok := extra["pe"].(string)
+	is.True(ok)
+	is.True(strings.Contains(pe, "panicked"))
+}
+
 // TestEventFieldsHaveByteLimits: tags, extras, fingerprint parts, and
 // the level each have a limit, so an event built from huge caller text
 // has a bounded body.

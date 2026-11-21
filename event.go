@@ -1,6 +1,7 @@
 package errs
 
 import (
+	"encoding"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -129,12 +130,24 @@ func eventKey(s string) string {
 	return cut(strings.ToValidUTF8(k, "\uFFFD"), maxKeyBytes)
 }
 
+// hasCustomMarshaler reports whether v implements a JSON or text
+// marshal interface that encoding/json/v2 invokes.
+func hasCustomMarshaler(v any) bool {
+	switch v.(type) {
+	case json.Marshaler, json.MarshalerTo, encoding.TextMarshaler, encoding.TextAppender:
+		return true
+	default:
+		return false
+	}
+}
+
 // encodeExtra encodes one extra value as JSON on the caller goroutine,
 // so the worker reads no memory the caller can still change. An error
-// goes as Error(), and a non-finite float goes as its text. Any other
-// value that JSON cannot encode, or whose marshal method panics, goes
-// as a fixed note so hidden fields never fall back to fmt text. A
-// value whose encoding is past maxExtraBytes goes as a size note.
+// without a JSON or text marshal method goes as Error(), and a
+// non-finite float goes as its text. Any other value that JSON cannot
+// encode, or whose marshal method panics, goes as a fixed note so
+// hidden fields never fall back to Error() or fmt text. A value whose
+// encoding is past maxExtraBytes goes as a size note.
 func encodeExtra(v any) (out jsontext.Value) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -147,7 +160,11 @@ func encodeExtra(v any) (out jsontext.Value) {
 	)
 	switch x := v.(type) {
 	case error:
-		b, err = json.Marshal(x.Error(), wireJSON)
+		if hasCustomMarshaler(v) {
+			b, err = json.Marshal(v, wireJSON)
+		} else {
+			b, err = json.Marshal(x.Error(), wireJSON)
+		}
 	case float64:
 		if math.IsNaN(x) || math.IsInf(x, 0) {
 			b, err = json.Marshal(strconv.FormatFloat(x, 'g', -1, 64), wireJSON)
