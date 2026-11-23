@@ -130,15 +130,30 @@ func eventKey(s string) string {
 	return cut(strings.ToValidUTF8(k, "\uFFFD"), maxKeyBytes)
 }
 
-// hasCustomMarshaler reports whether v implements a JSON or text
-// marshal interface that encoding/json/v2 invokes.
+var (
+	jsonMarshalerType   = reflect.TypeFor[json.Marshaler]()
+	jsonMarshalerToType = reflect.TypeFor[json.MarshalerTo]()
+	textMarshalerType   = reflect.TypeFor[encoding.TextMarshaler]()
+	textAppenderType    = reflect.TypeFor[encoding.TextAppender]()
+)
+
+// hasCustomMarshaler reports whether encoding/json/v2 invokes a JSON or
+// text marshal method for v, including a pointer-receiver method on a
+// non-pointer value.
 func hasCustomMarshaler(v any) bool {
 	switch v.(type) {
 	case json.Marshaler, json.MarshalerTo, encoding.TextMarshaler, encoding.TextAppender:
 		return true
-	default:
+	}
+	t := reflect.TypeOf(v)
+	if t == nil || t.Kind() == reflect.Pointer {
 		return false
 	}
+	pt := reflect.PointerTo(t)
+	return pt.Implements(jsonMarshalerType) ||
+		pt.Implements(jsonMarshalerToType) ||
+		pt.Implements(textMarshalerType) ||
+		pt.Implements(textAppenderType)
 }
 
 // encodeExtra encodes one extra value as JSON on the caller goroutine,

@@ -238,6 +238,117 @@ func TestEncodeExtraHonorsErrorMarshalers(t *testing.T) {
 	is.True(strings.Contains(pe, "panicked"))
 }
 
+// TestEncodeExtraHonorsPointerErrorMarshalers: WithExtra uses
+// pointer-receiver MarshalJSON, MarshalJSONTo, MarshalText, and
+// AppendText methods on error values passed by value or by pointer, on
+// both the HTTP sink and the journal sink. Typed-nil pointers encode as
+// null without panicking.
+func TestEncodeExtraHonorsPointerErrorMarshalers(t *testing.T) {
+	sinks := []struct {
+		name string
+		send func(t *testing.T, fn func()) (string, map[string]any)
+	}{
+		{
+			name: "http",
+			send: func(t *testing.T, fn func()) (string, map[string]any) {
+				t.Helper()
+				is := is.New(t)
+				resetActive(t)
+				srv := newSockeyeServer(t)
+				t.Cleanup(srv.Close)
+				is.NoErr(Init(Options{DSN: testDSN, HTTPClient: rewriteTransport(srv.URL)}))
+				t.Cleanup(func() { Flush(time.Second) })
+				fn()
+				Flush(time.Second)
+				ev := srv.firstEvent(t)
+				body, err := json.Marshal(ev)
+				is.NoErr(err)
+				return string(body), ev["extra"].(map[string]any)
+			},
+		},
+		{
+			name: "journal",
+			send: func(t *testing.T, fn func()) (string, map[string]any) {
+				t.Helper()
+				is := is.New(t)
+				resetActive(t)
+				var out bytes.Buffer
+				is.NoErr(Init(Options{Journal: &out}))
+				t.Cleanup(func() { Flush(time.Second) })
+				fn()
+				Flush(time.Second)
+				line := strings.TrimSuffix(out.String(), "\n")
+				body, ok := strings.CutPrefix(line, journalPrefix)
+				is.True(ok)
+				var ev map[string]any
+				is.NoErr(json.Unmarshal([]byte(body), &ev))
+				return body, ev["extra"].(map[string]any)
+			},
+		},
+	}
+
+	for _, sink := range sinks {
+		t.Run(sink.name, func(t *testing.T) {
+			is := is.New(t)
+			body, extra := sink.send(t, func() {
+				CaptureMessage("extra pointer error marshalers",
+					WithExtra("je_val", ptrJSONRedactedErr{raw: "secret-extra-pje-val"}),
+					WithExtra("je_ptr", &ptrJSONRedactedErr{raw: "secret-extra-pje-ptr"}),
+					WithExtra("je_nil", (*ptrJSONRedactedErr)(nil)),
+					WithExtra("jte_val", ptrJSONToRedactedErr{raw: "secret-extra-pjte-val"}),
+					WithExtra("jte_ptr", &ptrJSONToRedactedErr{raw: "secret-extra-pjte-ptr"}),
+					WithExtra("jte_nil", (*ptrJSONToRedactedErr)(nil)),
+					WithExtra("te_val", ptrTextRedactedErr{raw: "secret-extra-pte-val"}),
+					WithExtra("te_ptr", &ptrTextRedactedErr{raw: "secret-extra-pte-ptr"}),
+					WithExtra("te_nil", (*ptrTextRedactedErr)(nil)),
+					WithExtra("ae_val", ptrAppendTextRedactedErr{raw: "secret-extra-pae-val"}),
+					WithExtra("ae_ptr", &ptrAppendTextRedactedErr{raw: "secret-extra-pae-ptr"}),
+					WithExtra("ae_nil", (*ptrAppendTextRedactedErr)(nil)),
+					WithExtra("fe_val", ptrFailingJSONErr{raw: "secret-extra-pfe-val"}),
+					WithExtra("fe_ptr", &ptrFailingJSONErr{raw: "secret-extra-pfe-ptr"}),
+					WithExtra("pe_val", ptrPanickingJSONErr{raw: "secret-extra-ppe-val"}),
+					WithExtra("pe_ptr", &ptrPanickingJSONErr{raw: "secret-extra-ppe-ptr"}),
+					WithExtra("plain", errors.New("plain extra error")),
+				)
+			})
+			for _, leaked := range []string{
+				"secret-extra-pje-val", "secret-extra-pje-ptr",
+				"secret-extra-pjte-val", "secret-extra-pjte-ptr",
+				"secret-extra-pte-val", "secret-extra-pte-ptr",
+				"secret-extra-pae-val", "secret-extra-pae-ptr",
+				"secret-extra-pfe-val", "secret-extra-pfe-ptr",
+				"secret-extra-ppe-val", "secret-extra-ppe-ptr",
+				"raw-ptr-",
+			} {
+				is.True(!strings.Contains(body, leaked))
+			}
+			is.Eq(extra["je_val"], "REDACTED_PTR_JSON_ERR")
+			is.Eq(extra["je_ptr"], "REDACTED_PTR_JSON_ERR")
+			is.Nil(extra["je_nil"])
+			is.Eq(extra["jte_val"], "REDACTED_PTR_JSONTO_ERR")
+			is.Eq(extra["jte_ptr"], "REDACTED_PTR_JSONTO_ERR")
+			is.Nil(extra["jte_nil"])
+			is.Eq(extra["te_val"], "REDACTED_PTR_TEXT_ERR")
+			is.Eq(extra["te_ptr"], "REDACTED_PTR_TEXT_ERR")
+			is.Nil(extra["te_nil"])
+			is.Eq(extra["ae_val"], "REDACTED_PTR_APPEND_ERR")
+			is.Eq(extra["ae_ptr"], "REDACTED_PTR_APPEND_ERR")
+			is.Nil(extra["ae_nil"])
+			is.Eq(extra["plain"], "plain extra error")
+			for _, key := range []string{"fe_val", "fe_ptr"} {
+				s, ok := extra[key].(string)
+				is.True(ok)
+				is.True(strings.Contains(s, "could not encode"))
+			}
+			for _, key := range []string{"pe_val", "pe_ptr"} {
+				s, ok := extra[key].(string)
+				is.True(ok)
+				is.True(strings.Contains(s, "panicked"))
+			}
+		})
+	}
+}
+
 // TestEventFieldsHaveByteLimits: tags, extras, fingerprint parts, and
 // the level each have a limit, so an event built from huge caller text
 // has a bounded body.

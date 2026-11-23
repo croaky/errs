@@ -230,6 +230,42 @@ type panickingJSONErr struct{ raw string }
 func (e panickingJSONErr) Error() string              { return "raw-panic-json-err: " + e.raw }
 func (panickingJSONErr) MarshalJSON() ([]byte, error) { panic("marshal boom") }
 
+type ptrJSONRedactedErr struct{ raw string }
+
+func (e ptrJSONRedactedErr) Error() string { return "raw-ptr-json-err: " + e.raw }
+func (*ptrJSONRedactedErr) MarshalJSON() ([]byte, error) {
+	return []byte(`"REDACTED_PTR_JSON_ERR"`), nil
+}
+
+type ptrJSONToRedactedErr struct{ raw string }
+
+func (e ptrJSONToRedactedErr) Error() string { return "raw-ptr-jsonto-err: " + e.raw }
+func (*ptrJSONToRedactedErr) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return enc.WriteToken(jsontext.String("REDACTED_PTR_JSONTO_ERR"))
+}
+
+type ptrTextRedactedErr struct{ raw string }
+
+func (e ptrTextRedactedErr) Error() string               { return "raw-ptr-text-err: " + e.raw }
+func (*ptrTextRedactedErr) MarshalText() ([]byte, error) { return []byte("REDACTED_PTR_TEXT_ERR"), nil }
+
+type ptrAppendTextRedactedErr struct{ raw string }
+
+func (e ptrAppendTextRedactedErr) Error() string { return "raw-ptr-append-err: " + e.raw }
+func (*ptrAppendTextRedactedErr) AppendText(b []byte) ([]byte, error) {
+	return append(b, "REDACTED_PTR_APPEND_ERR"...), nil
+}
+
+type ptrFailingJSONErr struct{ raw string }
+
+func (e ptrFailingJSONErr) Error() string               { return "raw-ptr-fail-json-err: " + e.raw }
+func (*ptrFailingJSONErr) MarshalJSON() ([]byte, error) { return nil, errors.New("marshal failed") }
+
+type ptrPanickingJSONErr struct{ raw string }
+
+func (e ptrPanickingJSONErr) Error() string               { return "raw-ptr-panic-json-err: " + e.raw }
+func (*ptrPanickingJSONErr) MarshalJSON() ([]byte, error) { panic("marshal boom") }
+
 // TestSlogHandlerRedactsKindAnyValues: SlogHandler honors MarshalJSON,
 // MarshalText, json:"-", and field visibility at the top level and in
 // a group, on both the HTTP sink and the journal sink.
@@ -396,6 +432,137 @@ func TestSlogHandlerRedactsErrorMarshalers(t *testing.T) {
 			is.Eq(nested["jte"], "REDACTED_JSONTO_ERR")
 			is.Eq(nested["te"], "REDACTED_TEXT_ERR")
 			is.Eq(nested["ae"], "REDACTED_APPEND_ERR")
+		})
+	}
+}
+
+// TestSlogHandlerRedactsPointerErrorMarshalers: a KindAny error value
+// with a value-receiver Error() and a pointer-receiver marshal method
+// uses its marshal output when passed by value or by pointer, at top
+// level and in groups, on both the HTTP sink and the journal sink.
+// Typed-nil pointers encode as null without panicking.
+func TestSlogHandlerRedactsPointerErrorMarshalers(t *testing.T) {
+	sinks := []struct {
+		name string
+		send func(t *testing.T, fn func(*slog.Logger)) (string, map[string]any)
+	}{
+		{
+			name: "http",
+			send: func(t *testing.T, fn func(*slog.Logger)) (string, map[string]any) {
+				t.Helper()
+				is := is.New(t)
+				cs := slogTestClient(t)
+				fn(slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil))))
+				Flush(time.Second)
+				ev := cs.firstEvent(t)
+				body, err := json.Marshal(ev)
+				is.NoErr(err)
+				return string(body), ev["extra"].(map[string]any)
+			},
+		},
+		{
+			name: "journal",
+			send: func(t *testing.T, fn func(*slog.Logger)) (string, map[string]any) {
+				t.Helper()
+				is := is.New(t)
+				resetActive(t)
+				var out bytes.Buffer
+				is.NoErr(Init(Options{Journal: &out}))
+				t.Cleanup(func() { Flush(time.Second) })
+				fn(slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil))))
+				Flush(time.Second)
+				line := strings.TrimSuffix(out.String(), "\n")
+				body, ok := strings.CutPrefix(line, journalPrefix)
+				is.True(ok)
+				var ev map[string]any
+				is.NoErr(json.Unmarshal([]byte(body), &ev))
+				return body, ev["extra"].(map[string]any)
+			},
+		},
+	}
+
+	for _, sink := range sinks {
+		t.Run(sink.name, func(t *testing.T) {
+			is := is.New(t)
+			body, extra := sink.send(t, func(l *slog.Logger) {
+				l.Error("api failed",
+					"je_val", ptrJSONRedactedErr{raw: "secret-pje-val"},
+					"je_ptr", &ptrJSONRedactedErr{raw: "secret-pje-ptr"},
+					"je_nil", (*ptrJSONRedactedErr)(nil),
+					"jte_val", ptrJSONToRedactedErr{raw: "secret-pjte-val"},
+					"jte_ptr", &ptrJSONToRedactedErr{raw: "secret-pjte-ptr"},
+					"jte_nil", (*ptrJSONToRedactedErr)(nil),
+					"te_val", ptrTextRedactedErr{raw: "secret-pte-val"},
+					"te_ptr", &ptrTextRedactedErr{raw: "secret-pte-ptr"},
+					"te_nil", (*ptrTextRedactedErr)(nil),
+					"ae_val", ptrAppendTextRedactedErr{raw: "secret-pae-val"},
+					"ae_ptr", &ptrAppendTextRedactedErr{raw: "secret-pae-ptr"},
+					"ae_nil", (*ptrAppendTextRedactedErr)(nil),
+					"fe_val", ptrFailingJSONErr{raw: "secret-pfe-val"},
+					"fe_ptr", &ptrFailingJSONErr{raw: "secret-pfe-ptr"},
+					"pe_val", ptrPanickingJSONErr{raw: "secret-ppe-val"},
+					"pe_ptr", &ptrPanickingJSONErr{raw: "secret-ppe-ptr"},
+					slog.Group("nested",
+						"je_val", ptrJSONRedactedErr{raw: "secret-pje-grp-val"},
+						"je_ptr", &ptrJSONRedactedErr{raw: "secret-pje-grp-ptr"},
+						"je_nil", (*ptrJSONRedactedErr)(nil),
+						"jte_val", ptrJSONToRedactedErr{raw: "secret-pjte-grp-val"},
+						"jte_ptr", &ptrJSONToRedactedErr{raw: "secret-pjte-grp-ptr"},
+						"te_val", ptrTextRedactedErr{raw: "secret-pte-grp-val"},
+						"te_ptr", &ptrTextRedactedErr{raw: "secret-pte-grp-ptr"},
+						"ae_val", ptrAppendTextRedactedErr{raw: "secret-pae-grp-val"},
+						"ae_ptr", &ptrAppendTextRedactedErr{raw: "secret-pae-grp-ptr"},
+					),
+				)
+			})
+			for _, leaked := range []string{
+				"secret-pje-val", "secret-pje-ptr",
+				"secret-pjte-val", "secret-pjte-ptr",
+				"secret-pte-val", "secret-pte-ptr",
+				"secret-pae-val", "secret-pae-ptr",
+				"secret-pfe-val", "secret-pfe-ptr",
+				"secret-ppe-val", "secret-ppe-ptr",
+				"secret-pje-grp-val", "secret-pje-grp-ptr",
+				"secret-pjte-grp-val", "secret-pjte-grp-ptr",
+				"secret-pte-grp-val", "secret-pte-grp-ptr",
+				"secret-pae-grp-val", "secret-pae-grp-ptr",
+				"raw-ptr-",
+			} {
+				is.True(!strings.Contains(body, leaked))
+			}
+			is.Eq(extra["je_val"], "REDACTED_PTR_JSON_ERR")
+			is.Eq(extra["je_ptr"], "REDACTED_PTR_JSON_ERR")
+			is.Nil(extra["je_nil"])
+			is.Eq(extra["jte_val"], "REDACTED_PTR_JSONTO_ERR")
+			is.Eq(extra["jte_ptr"], "REDACTED_PTR_JSONTO_ERR")
+			is.Nil(extra["jte_nil"])
+			is.Eq(extra["te_val"], "REDACTED_PTR_TEXT_ERR")
+			is.Eq(extra["te_ptr"], "REDACTED_PTR_TEXT_ERR")
+			is.Nil(extra["te_nil"])
+			is.Eq(extra["ae_val"], "REDACTED_PTR_APPEND_ERR")
+			is.Eq(extra["ae_ptr"], "REDACTED_PTR_APPEND_ERR")
+			is.Nil(extra["ae_nil"])
+			for _, key := range []string{"fe_val", "fe_ptr"} {
+				s, ok := extra[key].(string)
+				is.True(ok)
+				is.True(strings.Contains(s, "could not encode"))
+			}
+			for _, key := range []string{"pe_val", "pe_ptr"} {
+				s, ok := extra[key].(string)
+				is.True(ok)
+				is.True(strings.Contains(s, "panicked"))
+			}
+			nested, ok := extra["nested"].(map[string]any)
+			is.True(ok)
+			is.Eq(nested["je_val"], "REDACTED_PTR_JSON_ERR")
+			is.Eq(nested["je_ptr"], "REDACTED_PTR_JSON_ERR")
+			is.Nil(nested["je_nil"])
+			is.Eq(nested["jte_val"], "REDACTED_PTR_JSONTO_ERR")
+			is.Eq(nested["jte_ptr"], "REDACTED_PTR_JSONTO_ERR")
+			is.Eq(nested["te_val"], "REDACTED_PTR_TEXT_ERR")
+			is.Eq(nested["te_ptr"], "REDACTED_PTR_TEXT_ERR")
+			is.Eq(nested["ae_val"], "REDACTED_PTR_APPEND_ERR")
+			is.Eq(nested["ae_ptr"], "REDACTED_PTR_APPEND_ERR")
 		})
 	}
 }
