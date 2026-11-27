@@ -4,12 +4,20 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"log"
 	"log/slog"
+	"reflect"
 )
 
 // SlogHandler wraps next. Every record goes to next as before. Each
 // record at error level or above also goes to the client, so one
 // slog.Error call writes the log line and opens an error group.
+//
+// Pass an explicit handler such as slog.NewTextHandler or
+// slog.NewJSONHandler when installing the result with slog.SetDefault.
+// If next is Go's built-in default slog handler, SlogHandler replaces
+// it with a text handler on log.Writer() so slog.SetDefault does not
+// route log output back into the default handler and deadlock log.
 //
 // A record whose "err" attribute holds an error is sent as an
 // exception, wrapped with the record message. The exception always uses
@@ -25,7 +33,16 @@ import (
 // ReplaceAttr function of next does not apply to events. With no
 // client started, the handler only calls next.
 func SlogHandler(next slog.Handler) slog.Handler {
+	if isDefaultSlogHandler(next) {
+		next = slog.NewTextHandler(log.Writer(), nil)
+	}
 	return slogHandler{next}
+}
+
+func isDefaultSlogHandler(h slog.Handler) bool {
+	t := reflect.TypeOf(h)
+	return t != nil && t.Kind() == reflect.Pointer &&
+		t.Elem().PkgPath() == "log/slog" && t.Elem().Name() == "defaultHandler"
 }
 
 type slogHandler struct{ slog.Handler }

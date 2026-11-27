@@ -29,12 +29,18 @@ if err != nil {
 defer errs.Flush(2 * time.Second)
 ```
 
-Wrap the default slog handler to report every `slog.Error` call. The
-call still writes its log line:
+Wrap an explicit slog handler (such as `slog.NewTextHandler` or
+`slog.NewJSONHandler`) to report every `slog.Error` call. The call still
+writes its log line:
 
 ```go
-slog.SetDefault(slog.New(errs.SlogHandler(slog.Default().Handler())))
+h := slog.NewTextHandler(os.Stderr, nil)
+slog.SetDefault(slog.New(errs.SlogHandler(h)))
 ```
+
+If you pass Go's built-in default handler from `slog.Default().Handler()`
+to `SlogHandler`, `SlogHandler` replaces it with a text handler on
+`log.Writer()` so `slog.SetDefault` does not deadlock `log`.
 
 The handler sends the record attributes as extras. It resolves each
 `slog.LogValuer` first and encodes non-scalar values as JSON, matching

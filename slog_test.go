@@ -2,12 +2,15 @@ package errs
 
 import (
 	"bytes"
+	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"io"
 	"log"
 	"log/slog"
+	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
@@ -694,6 +697,49 @@ func TestSlogHandlerWithoutClientOnlyLogs(t *testing.T) {
 	log.Error("no client", "err", errors.New("x"))
 
 	is.True(strings.Contains(buf.String(), "no client"))
+}
+
+// TestSlogHandlerDefaultLoggerNoDeadlock runs the default-handler
+// wrapping setup in a fresh subprocess under a timeout so slog.Default
+// starts with Go's built-in defaultHandler.
+func TestSlogHandlerDefaultLoggerNoDeadlock(t *testing.T) {
+	is := is.New(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSlogHandlerDefaultLoggerNoDeadlockHelper$")
+	cmd.Env = append(os.Environ(), "ERRS_TEST_SLOG_DEFAULT_SUBPROCESS=1")
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("subprocess timed out (deadlock): %s", out)
+	}
+	is.NoErr(err)
+}
+
+func TestSlogHandlerDefaultLoggerNoDeadlockHelper(t *testing.T) {
+	if os.Getenv("ERRS_TEST_SLOG_DEFAULT_SUBPROCESS") != "1" {
+		return
+	}
+	is := is.New(t)
+	var logBuf, journalBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+
+	is.NoErr(Init(Options{Journal: &journalBuf}))
+	slog.SetDefault(slog.New(SlogHandler(slog.Default().Handler())))
+
+	slog.Info("hello info")
+	slog.Error("hello error")
+	log.Print("hello stdlog")
+	Flush(time.Second)
+
+	logged := logBuf.String()
+	is.True(strings.Contains(logged, "hello info"))
+	is.True(strings.Contains(logged, "hello error"))
+	is.True(strings.Contains(logged, "hello stdlog"))
+
+	lines := strings.Split(strings.TrimSpace(journalBuf.String()), "\n")
+	is.Eq(len(lines), 1)
+	is.True(strings.Contains(lines[0], "hello error"))
 }
 
 // BenchmarkSlogHandlerError measures one slog.Error call with an error
