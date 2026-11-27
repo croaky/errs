@@ -394,6 +394,15 @@ func (c *client) deliver(name string, build func() (*http.Request, error)) bool 
 			continue
 		}
 
+		// Close 1xx responses without reading resp.Body. On 101 Switching
+		// Protocols, net/http hands over the raw connection without
+		// http.Client.Timeout, so reading can block forever.
+		if resp.StatusCode < 200 {
+			resp.Body.Close()
+			logger.Printf("%s: send: HTTP %d (non-retriable)", name, resp.StatusCode)
+			return false
+		}
+
 		_, readErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		resp.Body.Close()
 		lastStatus = resp.StatusCode

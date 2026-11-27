@@ -616,3 +616,48 @@ func TestRecordRequestDropsBadTimeIndividually(t *testing.T) {
 	ps.breakerMu.Unlock()
 	is.Eq(failures, 0)
 }
+
+// TestPerfPostDoesNotHangOn101Response verifies that a silent 101
+// Switching Protocols response does not block the perf sender, counts
+// as a breaker failure, and lets later batches deliver.
+func TestPerfPostDoesNotHangOn101Response(t *testing.T) {
+	is := is.New(t)
+	resetActive(t)
+	srv, calls := newSilent101Server(t, 1)
+
+	hc := rewriteTransport(srv.URL)
+	hc.Timeout = 500 * time.Millisecond
+	is.NoErr(Init(Options{
+		DSN:        testSockeyeDSN,
+		HTTPClient: hc,
+	}))
+	c := active.Load()
+
+	for range perfBatchMax {
+		RecordRequest(Request{Route: "/first", Status: 200})
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if ps := c.perf.Load(); ps != nil {
+			ps.breakerMu.Lock()
+			f := ps.failures
+			ps.breakerMu.Unlock()
+			if f == 1 {
+				break
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	ps := c.perf.Load()
+	ps.breakerMu.Lock()
+	failuresAfter101 := ps.failures
+	ps.breakerMu.Unlock()
+	is.Eq(failuresAfter101, 1)
+	is.Eq(DroppedRequests(), int64(perfBatchMax))
+
+	RecordRequest(Request{Route: "/second", Status: 200})
+	start := time.Now()
+	Flush(2 * time.Second)
+	is.True(time.Since(start) < time.Second)
+	is.True(calls.Load() >= 2)
+}

@@ -484,9 +484,16 @@ func (s *perfSender) post(body []byte, key string, unsent int64, oldest time.Tim
 			status = 0
 			continue
 		}
+		status = resp.StatusCode
+		// Close 1xx responses without reading resp.Body. On 101 Switching
+		// Protocols, net/http hands over the raw connection without
+		// http.Client.Timeout, so reading can block forever.
+		if status < 200 {
+			resp.Body.Close()
+			break
+		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		resp.Body.Close()
-		status = resp.StatusCode
 		if !isTransient(status) {
 			break
 		}

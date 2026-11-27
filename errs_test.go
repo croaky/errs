@@ -503,3 +503,76 @@ func TestInAppAndRelativeTo(t *testing.T) {
 	is.Eq(relativeTo("/src/app", "/src/app"), "/src/app")
 	is.Eq(relativeTo("/src/app/main.go", ""), "/src/app/main.go")
 }
+
+// newSilent101Server answers the first n requests with 101 Switching
+// Protocols and keeps each hijacked connection open and silent until
+// test cleanup. Later requests receive 202.
+func newSilent101Server(t *testing.T, count101 int) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var n atomic.Int32
+	done := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if int(n.Add(1)) <= count101 {
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			conn, bufrw, err := hj.Hijack()
+			if err != nil {
+				return
+			}
+			_, _ = bufrw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+			_ = bufrw.Flush()
+			<-done
+			_ = conn.Close()
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	t.Cleanup(func() {
+		close(done)
+		srv.Close()
+	})
+	return srv, &n
+}
+
+// TestDeliverDoesNotHangOn101Response verifies that a silent 101
+// Switching Protocols response does not block the events worker,
+// counts as a breaker failure, and lets later events deliver.
+func TestDeliverDoesNotHangOn101Response(t *testing.T) {
+	is := is.New(t)
+	resetActive(t)
+	srv, calls := newSilent101Server(t, 1)
+
+	hc := rewriteTransport(srv.URL)
+	hc.Timeout = 500 * time.Millisecond
+	is.NoErr(Init(Options{
+		DSN:        testDSN,
+		HTTPClient: hc,
+	}))
+	c := active.Load()
+
+	CaptureMessage("first-101")
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		c.breakerMu.Lock()
+		f := c.failures
+		c.breakerMu.Unlock()
+		if f == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	c.breakerMu.Lock()
+	failuresAfter101 := c.failures
+	c.breakerMu.Unlock()
+	is.Eq(failuresAfter101, 1)
+
+	CaptureMessage("second-202")
+	start := time.Now()
+	Flush(2 * time.Second)
+	is.True(time.Since(start) < time.Second)
+	is.Eq(calls.Load(), int32(2))
+}
