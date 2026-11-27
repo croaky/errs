@@ -7,7 +7,9 @@ import (
 	"hash/maphash"
 	"maps"
 	"net/http"
+	"reflect"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -268,8 +270,9 @@ func (c *client) record(ok bool, now time.Time) {
 
 // fingerprintKey names the error an event belongs to, for sampling.
 // It follows the order sockeye groups by: the event's own
-// fingerprint, else the top three in-app frames (or top three frames
-// when none is in-app), else the type and the message with its digits
+// fingerprint, else the top three in-app frames (or top three
+// non-reporting frames, or top three frames when only reporting
+// frames remain), else the type and the message with its digits
 // replaced. Keying any framed event on frames alone keeps one call
 // site in one bucket even when caller text varies. It returns an
 // 8-byte hash of that text, whatever its length, so a key holds no
@@ -299,6 +302,14 @@ func fingerprintKey(seed maphash.Seed, e *event) uint64 {
 				if f := &frames[i]; f.InApp {
 					top[nTop] = f
 					nTop++
+				}
+			}
+			if nTop == 0 {
+				for i := len(frames) - 1; i >= 0 && nTop < len(top); i-- {
+					if f := &frames[i]; !isReportingFrame(f.Function) {
+						top[nTop] = f
+						nTop++
+					}
 				}
 			}
 			if nTop == 0 {
@@ -372,3 +383,16 @@ func writeNoDigits(h *maphash.Hash, s string) {
 }
 
 func isDigit(c byte) bool { return '0' <= c && c <= '9' }
+
+var errsPkg = reflect.TypeFor[client]().PkgPath()
+
+// isReportingFrame reports whether fn belongs to errs, log, or
+// log/slog. The fingerprintKey fallback skips these frames so
+// SlogHandler and log calls key on the caller, not the SDK.
+func isReportingFrame(fn string) bool {
+	return hasPkgPrefix(fn, errsPkg) || hasPkgPrefix(fn, "log") || hasPkgPrefix(fn, "log/slog")
+}
+
+func hasPkgPrefix(fn, pkg string) bool {
+	return pkg != "" && len(fn) > len(pkg) && strings.HasPrefix(fn, pkg) && fn[len(pkg)] == '.'
+}

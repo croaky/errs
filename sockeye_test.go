@@ -873,6 +873,70 @@ func TestFingerprintKeyNonInAppFramesIgnoresText(t *testing.T) {
 	is.Eq(fingerprintKey(seed, e1), fingerprintKey(seed, e2))
 }
 
+// TestFingerprintKeySkipsReportingFrames verifies that the non-in_app
+// fallback skips errs, log, and log/slog frames, keys on caller frames,
+// and keeps reporting frames only when no other frame exists.
+func TestFingerprintKeySkipsReportingFrames(t *testing.T) {
+	is := is.New(t)
+	seed := maphash.MakeSeed()
+	eventWith := func(msg string, frames []frame) *event {
+		return &event{
+			Message:    msg,
+			Stacktrace: &stacktrace{Frames: frames},
+		}
+	}
+
+	alphaViaSlog := eventWith("first", []frame{
+		{Function: "example.com/dep.alpha", Filename: "dep.go"},
+		{Function: "log/slog.(*Logger).log", Filename: "logger.go"},
+		{Function: "github.com/croaky/errs.slogHandler.Handle", Filename: "slog.go"},
+		{Function: "github.com/croaky/errs.captureRecord", Filename: "slog.go"},
+	})
+	alphaViaLog := eventWith("second", []frame{
+		{Function: "example.com/dep.alpha", Filename: "dep.go"},
+		{Function: "log.Printf", Filename: "log.go"},
+		{Function: "log/slog.(*handlerWriter).Write", Filename: "logger.go"},
+		{Function: "log/slog.(*Logger).logAttrs", Filename: "logger.go"},
+		{Function: "github.com/croaky/errs.slogHandler.Handle", Filename: "slog.go"},
+		{Function: "github.com/croaky/errs.captureRecord", Filename: "slog.go"},
+	})
+	betaViaSlog := eventWith("first", []frame{
+		{Function: "example.com/dep.beta", Filename: "dep.go"},
+		{Function: "log/slog.(*Logger).log", Filename: "logger.go"},
+		{Function: "github.com/croaky/errs.slogHandler.Handle", Filename: "slog.go"},
+		{Function: "github.com/croaky/errs.captureRecord", Filename: "slog.go"},
+	})
+
+	wantAlpha := maphash.String(seed, "frames:example.com/dep.alpha@dep.go")
+	is.Eq(fingerprintKey(seed, alphaViaSlog), wantAlpha)
+	is.Eq(fingerprintKey(seed, alphaViaLog), wantAlpha)
+	is.True(fingerprintKey(seed, alphaViaSlog) != fingerprintKey(seed, betaViaSlog))
+
+	// A package whose name merely shares a prefix is not skipped.
+	similarPkg := eventWith("x", []frame{
+		{Function: "github.com/croaky/errs_test.callSite", Filename: "t.go"},
+		{Function: "logger.emit", Filename: "logger.go"},
+		{Function: "log/slog.(*Logger).log", Filename: "logger.go"},
+		{Function: "github.com/croaky/errs.captureRecord", Filename: "slog.go"},
+	})
+	is.Eq(
+		fingerprintKey(seed, similarPkg),
+		maphash.String(seed, "frames:logger.emit@logger.go\x00github.com/croaky/errs_test.callSite@t.go"),
+	)
+
+	// When every frame is a reporting frame, the fallback still hashes
+	// frames rather than caller text.
+	onlyReportingA := eventWith("alpha text", []frame{
+		{Function: "log/slog.(*Logger).log", Filename: "logger.go"},
+		{Function: "github.com/croaky/errs.captureRecord", Filename: "slog.go"},
+	})
+	onlyReportingB := eventWith("beta text", []frame{
+		{Function: "log/slog.(*Logger).log", Filename: "logger.go"},
+		{Function: "github.com/croaky/errs.captureRecord", Filename: "slog.go"},
+	})
+	is.Eq(fingerprintKey(seed, onlyReportingA), fingerprintKey(seed, onlyReportingB))
+}
+
 // sendNow runs a message event through c.send on the test goroutine, so
 // a test of sampling or of the breaker reads the result at once.
 func sendNow(c *client, msg string, opts ...Option) {
