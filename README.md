@@ -127,9 +127,9 @@ The sockeye path protects both ends of the connection:
   that reaches sockeye carries the number as `extra.dropped`.
 - Each event has a size limit. An event keeps its first 50 tags and
   50 extras, and its first 10 fingerprint parts. The client cuts a
-  key past 64 bytes, a tag value past 1 KiB, a fingerprint part past
-  256 bytes, and a message or error text past 8 KiB. An extra whose
-  JSON is past 2 KiB becomes a note that gives its size.
+  key past 64 encoded JSON bytes, a tag value past 1 KiB, a fingerprint
+  part past 256 bytes, and a message or error text past 8 KiB. An extra
+  whose JSON is past 2 KiB becomes a note that gives its size.
 - The client replaces each run of invalid UTF-8 in a tag or extra key
   with U+FFFD. Keys that then match are one key, and the last one in
   option order wins.

@@ -101,19 +101,45 @@ func (c *client) newEvent(level string, opts []Option) *event {
 // truncate trims string s to maxMessageBytes bytes at a rune boundary.
 func truncate(s string) string { return cut(s, maxMessageBytes) }
 
-// cut trims s to n bytes at a rune boundary. It returns a copy, also
-// of a short s, so the result does not keep a longer string in memory.
-// A short s can be a substring of a long string, such as r.Method of
-// the request line.
+// cut trims s so its JSON-encoded string content stays within n bytes
+// at a rune boundary. It returns a copy, also of a short s, so the
+// result does not keep a longer string in memory. A short s can be a
+// substring of a long string, such as r.Method of the request line.
 func cut(s string, n int) string {
-	if len(s) <= n {
-		return strings.Clone(s)
+	encoded := 0
+	for i := 0; i < len(s); {
+		var step, enc int
+		if b := s[i]; b < utf8.RuneSelf {
+			step = 1
+			switch {
+			case b < 0x20:
+				switch b {
+				case '\b', '\f', '\n', '\r', '\t':
+					enc = 2
+				default:
+					enc = 6
+				}
+			case b == '"' || b == '\\':
+				enc = 2
+			default:
+				enc = 1
+			}
+		} else {
+			r, size := utf8.DecodeRuneInString(s[i:])
+			step = size
+			if r == utf8.RuneError && size == 1 {
+				enc = 3
+			} else {
+				enc = size
+			}
+		}
+		if encoded+enc > n {
+			return strings.Clone(s[:i])
+		}
+		encoded += enc
+		i += step
 	}
-	end := n
-	for end > 0 && !isRuneStart(s[end]) {
-		end--
-	}
-	return strings.Clone(s[:end])
+	return strings.Clone(s)
 }
 
 // eventKey makes a tag or extra key canonical. It cuts the key to
@@ -208,8 +234,6 @@ func noteValue(s string) jsontext.Value {
 	b, _ := json.Marshal(s)
 	return b
 }
-
-func isRuneStart(b byte) bool { return b&0xC0 != 0x80 }
 
 // exceptionFromError builds an exception payload for err.
 func exceptionFromError(err error, fallbackPCs []uintptr, root, inAppPrefix string) *exceptionPayload {

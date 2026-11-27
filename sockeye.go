@@ -214,9 +214,13 @@ func (c *client) post(e *event, count int) {
 	}
 
 	if c.journal != nil {
-		ok := c.writeJournal(body)
-		c.record(ok, c.now())
-		if !ok {
+		switch c.writeJournal(body) {
+		case journalOK:
+			c.record(true, c.now())
+		case journalWriteFailed:
+			c.record(false, c.now())
+			c.dropped.Add(dropped + int64(lost))
+		case journalTooLarge:
 			c.dropped.Add(dropped + int64(lost))
 		}
 		return

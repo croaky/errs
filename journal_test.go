@@ -107,6 +107,80 @@ func TestJournalSinkBodyBound(t *testing.T) {
 	is := is.New(t)
 	var out bytes.Buffer
 	c := &client{journal: &out}
-	is.Eq(c.writeJournal(make([]byte, journalBodyMax+1)), false)
+	is.Eq(c.writeJournal(make([]byte, journalBodyMax+1)), journalTooLarge)
 	is.Eq(out.Len(), 0)
+}
+
+// TestJournalSizeRefusalDoesNotTripBreaker verifies that consecutive
+// oversize journal events increment dropped without opening the shared
+// circuit breaker, while real writer failures still open it.
+func TestJournalSizeRefusalDoesNotTripBreaker(t *testing.T) {
+	is := is.New(t)
+	var out bytes.Buffer
+	clock := newTestClock()
+	c := &client{journal: &out, clock: clock.Now}
+
+	oversize := &event{
+		EventID: "oversize",
+		Message: strings.Repeat("a", journalBodyMax+1),
+	}
+	for range breakerFailures + 2 {
+		c.post(oversize, 0)
+	}
+	is.Eq(c.failures, 0)
+	is.True(c.allow(clock.Now()))
+	is.Eq(c.dropped.Load(), int64(breakerFailures+2))
+
+	c.post(&event{EventID: "ok", Message: "normal"}, 0)
+	is.True(strings.Contains(out.String(), `"message":"normal"`))
+
+	// Real writer failures still open the breaker after breakerFailures.
+	bad := &client{journal: &journalShortWriter{}, clock: clock.Now}
+	for range breakerFailures {
+		bad.post(&event{EventID: "fail", Message: "x"}, 0)
+	}
+	is.Eq(bad.failures, breakerFailures)
+	is.True(!bad.allow(clock.Now()))
+}
+
+// TestMaxedEscapedEventFitsJournalCap verifies that an event at every
+// documented limit filled with control bytes and invalid UTF-8 still
+// encodes under journalBodyMax and writes one line to the journal.
+func TestMaxedEscapedEventFitsJournalCap(t *testing.T) {
+	is := is.New(t)
+	resetActive(t)
+	var out bytes.Buffer
+	is.NoErr(Init(Options{Journal: &out}))
+	defer Flush(time.Second)
+
+	ctrl := strings.Repeat("\x00", maxMessageBytes)
+	badUTF8 := strings.Repeat("\xff", maxMessageBytes)
+	var opts []Option
+	for i := range maxTags {
+		key := strings.Repeat("\x00", 20) + string(rune('a'+i%26)) + string(rune('A'+i/26))
+		if i%2 == 0 {
+			opts = append(opts, WithTag(key, ctrl))
+		} else {
+			opts = append(opts, WithTag(key, badUTF8))
+		}
+	}
+	for i := range maxExtras {
+		key := strings.Repeat("\xff", 20) + string(rune('a'+i%26)) + string(rune('A'+i/26))
+		opts = append(opts, WithExtra(key, strings.Repeat("x", maxExtraBytes-10)))
+	}
+	fp := make([]string, maxFingerprintParts)
+	for i := range fp {
+		fp[i] = ctrl
+	}
+	opts = append(opts, WithFingerprint(fp...), WithLevel(ctrl))
+
+	CaptureException(deepErr(64), opts...)
+	Flush(time.Second)
+
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	is.Eq(len(lines), 1)
+	body, ok := strings.CutPrefix(lines[0], journalPrefix)
+	is.True(ok)
+	is.True(len(body) <= journalBodyMax)
+	is.Eq(active.Load().dropped.Load(), int64(0))
 }
