@@ -204,10 +204,11 @@ func perfMethod(m string) string {
 }
 
 // perfExtra encodes extra as sockeye takes it. An extra that breaks a
-// limit becomes a note that says which, since sockeye refuses the
-// whole batch for one bad record. Each note has a fixed size and holds
-// no caller text, so a note never breaks the limit itself.
-func perfExtra(extra map[string]any) jsontext.Value {
+// limit or panics while encoding becomes a note that says which, since
+// sockeye refuses the whole batch for one bad record. Each note has a
+// fixed size and holds no caller text, so a note never breaks the limit
+// itself.
+func perfExtra(extra map[string]any) (out jsontext.Value) {
 	if extra == nil {
 		return nil
 	}
@@ -216,6 +217,11 @@ func perfExtra(extra map[string]any) jsontext.Value {
 			return jsontext.Value(`{"invalid":"extra keys must match [a-z0-9_] and be at most 64 bytes"}`)
 		}
 	}
+	defer func() {
+		if recover() != nil {
+			out = jsontext.Value(`{"invalid":"extra panicked while it encoded"}`)
+		}
+	}()
 	b, err := json.Marshal(extra, wireJSON)
 	switch {
 	case err != nil:

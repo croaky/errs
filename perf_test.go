@@ -661,3 +661,50 @@ func TestPerfPostDoesNotHangOn101Response(t *testing.T) {
 	is.True(time.Since(start) < time.Second)
 	is.True(calls.Load() >= 2)
 }
+
+type panicPerfJSON struct{ secret string }
+
+func (panicPerfJSON) MarshalJSON() ([]byte, error) { panic("json-secret-panic") }
+
+type panicPerfText struct{ secret string }
+
+func (panicPerfText) MarshalText() ([]byte, error) { panic("text-secret-panic") }
+
+type panicPerfPtr struct{ secret string }
+
+func (p *panicPerfPtr) MarshalJSON() ([]byte, error) { return []byte(p.secret), nil }
+
+// TestRecordRequestRecoversExtraMarshalPanic verifies that panicking
+// MarshalJSON, MarshalText, and pointer-receiver marshal methods in
+// Request.Extra never panic out of RecordRequest, become a fixed note
+// with no caller or panic text, and leave other batch records intact.
+func TestRecordRequestRecoversExtraMarshalPanic(t *testing.T) {
+	is := is.New(t)
+	srv := newPerfServer(t)
+	initPerf(t, srv)
+
+	RecordRequest(Request{Route: "/ok-before", Status: 200, Extra: map[string]any{"q": "go"}})
+	RecordRequest(Request{Route: "/panic-json", Status: 200, Extra: map[string]any{"v": panicPerfJSON{secret: "secret-a"}}})
+	RecordRequest(Request{Route: "/panic-text", Status: 200, Extra: map[string]any{"v": panicPerfText{secret: "secret-b"}}})
+	RecordRequest(Request{Route: "/panic-ptr", Status: 200, Extra: map[string]any{"v": struct{ *panicPerfPtr }{}}})
+	RecordRequest(Request{Route: "/ok-after", Status: 200, Extra: map[string]any{"q": "rust"}})
+	Flush(time.Second)
+
+	var recs []map[string]any
+	var rawBodies string
+	for _, p := range srv.received() {
+		rawBodies += p.body
+		recs = append(recs, p.records...)
+	}
+	is.Eq(len(recs), 5)
+	for _, leaked := range []string{"json-secret-panic", "text-secret-panic", "secret-a", "secret-b"} {
+		is.True(!strings.Contains(rawBodies, leaked))
+	}
+	is.Eq(recs[0]["extra"], map[string]any{"q": "go"})
+	for _, idx := range []int{1, 2, 3} {
+		extra, ok := recs[idx]["extra"].(map[string]any)
+		is.True(ok)
+		is.Eq(extra["invalid"], "extra panicked while it encoded")
+	}
+	is.Eq(recs[4]["extra"], map[string]any{"q": "rust"})
+}
