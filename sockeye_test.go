@@ -795,6 +795,84 @@ func TestOneCallSiteProducesOneSamplingBucket(t *testing.T) {
 	}
 }
 
+// TestDefaultPrefixSamplingKeysOnFramesAlone verifies that without an
+// InAppPrefix override (including when no frame is marked in_app),
+// varying non-digit text from one call site still maps to one bucket
+// across CaptureException, CaptureMessage, and SlogHandler.
+func TestDefaultPrefixSamplingKeysOnFramesAlone(t *testing.T) {
+	cases := []struct {
+		name string
+		call func(slug string)
+	}{
+		{"CaptureException", func(slug string) {
+			CaptureException(errors.New(slug + ": request rejected"))
+		}},
+		{"CaptureMessage", func(slug string) {
+			CaptureMessage("request rejected for " + slug)
+		}},
+		{"SlogHandler", func(slug string) {
+			slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil))).Error("request rejected for " + slug)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			is := is.New(t)
+			resetActive(t)
+			srv := newSockeyeServer(t)
+			defer srv.Close()
+			is.NoErr(Init(Options{
+				SockeyeDSN: testSockeyeDSN,
+				HTTPClient: rewriteTransport(srv.URL),
+				Clock:      newTestClock().Now,
+			}))
+			c := active.Load()
+
+			const n = fullPerWindow + 20
+			for i := range n {
+				slug := "user-" + strings.Repeat(string(rune('a'+i%26)), i/26+1)
+				tc.call(slug)
+			}
+			Flush(5 * time.Second)
+
+			c.breakerMu.Lock()
+			buckets := len(c.buckets)
+			c.breakerMu.Unlock()
+			is.Eq(buckets, 1)
+
+			total := 0
+			for _, r := range srv.requests() {
+				cnt, _ := r.ev["count"].(float64)
+				total += max(int(cnt), 1)
+			}
+			is.Eq(total, n)
+		})
+	}
+}
+
+// TestFingerprintKeyNonInAppFramesIgnoresText verifies that an event
+// with frames where no frame is in_app still keys on frames rather
+// than caller-shaped message or exception text.
+func TestFingerprintKeyNonInAppFramesIgnoresText(t *testing.T) {
+	is := is.New(t)
+	seed := maphash.MakeSeed()
+	frames := []frame{{Function: "net/http.(*conn).serve", Filename: "server.go", InApp: false}}
+	e1 := &event{
+		Exception: &exceptionPayload{Values: []exceptionValue{{
+			Type:       "alpha",
+			Value:      "alpha: first caller text",
+			Stacktrace: &stacktrace{Frames: frames},
+		}}},
+	}
+	e2 := &event{
+		Exception: &exceptionPayload{Values: []exceptionValue{{
+			Type:       "beta",
+			Value:      "beta: different caller text",
+			Stacktrace: &stacktrace{Frames: frames},
+		}}},
+	}
+	is.Eq(fingerprintKey(seed, e1), fingerprintKey(seed, e2))
+}
+
 // sendNow runs a message event through c.send on the test goroutine, so
 // a test of sampling or of the breaker reads the result at once.
 func sendNow(c *client, msg string, opts ...Option) {

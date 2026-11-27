@@ -268,15 +268,15 @@ func (c *client) record(ok bool, now time.Time) {
 
 // fingerprintKey names the error an event belongs to, for sampling.
 // It follows the order sockeye groups by: the event's own
-// fingerprint, else the top three in-app frames alone, else the type
-// and the message with its digits replaced. Dropping the type and
-// message when in-app frames exist keeps one call site in one bucket
-// even when caller text varies. It returns an 8-byte hash of that
-// text, whatever its length, so a key holds no caller text. The seed
-// is random for each client, so a caller cannot craft two texts with
-// one hash. A real collision makes two errors share one sampling
-// allowance. It loses no count. The worker calls it for each event, so
-// it hashes in place and builds no string.
+// fingerprint, else the top three in-app frames (or top three frames
+// when none is in-app), else the type and the message with its digits
+// replaced. Keying any framed event on frames alone keeps one call
+// site in one bucket even when caller text varies. It returns an
+// 8-byte hash of that text, whatever its length, so a key holds no
+// caller text. The seed is random for each client, so a caller cannot
+// craft two texts with one hash. A real collision makes two errors
+// share one sampling allowance. It loses no count. The worker calls
+// it for each event, so it hashes in place and builds no string.
 func fingerprintKey(seed maphash.Seed, e *event) uint64 {
 	var h maphash.Hash
 	h.SetSeed(seed)
@@ -301,18 +301,22 @@ func fingerprintKey(seed maphash.Seed, e *event) uint64 {
 					nTop++
 				}
 			}
-			if nTop > 0 {
-				h.WriteString("frames:")
-				for i, f := range top[:nTop] {
-					if i > 0 {
-						h.WriteByte(0)
-					}
-					h.WriteString(f.Function)
-					h.WriteByte('@')
-					h.WriteString(f.Filename)
+			if nTop == 0 {
+				for i := len(frames) - 1; i >= 0 && nTop < len(top); i-- {
+					top[nTop] = &frames[i]
+					nTop++
 				}
-				break
 			}
+			h.WriteString("frames:")
+			for i, f := range top[:nTop] {
+				if i > 0 {
+					h.WriteByte(0)
+				}
+				h.WriteString(f.Function)
+				h.WriteByte('@')
+				h.WriteString(f.Filename)
+			}
+			break
 		}
 		switch {
 		case e.Exception != nil && len(e.Exception.Values) > 0:

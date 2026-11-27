@@ -383,16 +383,52 @@ func resolveFrames(pcs []uintptr, root, inAppPrefix string) []frame {
 	return out
 }
 
-// inApp reports whether the function belongs to the application module:
-// fn starts with prefix and then "/" or ".". resolveFrames calls it
-// for each frame, so it builds no string.
+// inApp reports whether the function belongs to the application:
+// package main (main.*), a package under prefix, or the module root
+// whose final path segment contains dots escaped as %2e by the Go
+// runtime. resolveFrames calls it for each frame, so it builds no
+// string.
 func inApp(fn, prefix string) bool {
+	if strings.HasPrefix(fn, "main.") {
+		return true
+	}
 	prefix = strings.TrimSuffix(prefix, "/")
-	if prefix == "" || len(fn) <= len(prefix) || !strings.HasPrefix(fn, prefix) {
+	if prefix == "" {
 		return false
 	}
-	c := fn[len(prefix)]
-	return c == '/' || c == '.'
+	if len(fn) > len(prefix) && strings.HasPrefix(fn, prefix) {
+		c := fn[len(prefix)]
+		if c == '/' || c == '.' {
+			return true
+		}
+	}
+	slash := strings.LastIndexByte(prefix, '/')
+	head, tail := prefix[:slash+1], prefix[slash+1:]
+	if strings.IndexByte(tail, '.') >= 0 {
+		return hasEscapedDotPrefix(fn, head, tail)
+	}
+	return false
+}
+
+func hasEscapedDotPrefix(fn, head, tail string) bool {
+	if !strings.HasPrefix(fn, head) {
+		return false
+	}
+	s := fn[len(head):]
+	for i := 0; i < len(tail); i++ {
+		if tail[i] == '.' {
+			if !strings.HasPrefix(s, "%2e") {
+				return false
+			}
+			s = s[3:]
+			continue
+		}
+		if len(s) == 0 || s[0] != tail[i] {
+			return false
+		}
+		s = s[1:]
+	}
+	return len(s) > 0 && s[0] == '.'
 }
 
 // relativeTo trims root and "/" from the file path when path starts
