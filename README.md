@@ -217,7 +217,9 @@ refuses the batches with 409, and the client discards them.
 The request path protects both ends of the connection too:
 
 - `RecordRequest` never blocks. It queues up to 5,000 records, and
-  drops a record past that.
+  drops a record past that. It also drops a record whose `Time` is
+  older than 55 minutes or whose year is outside `0..9999`, so one bad
+  record does not fail its batch.
 - `RecordRequest` copies each string it keeps. A queued record holds
   only the bytes it sends, not the request line that `r.Method` and
   `r.URL.Path` come from.

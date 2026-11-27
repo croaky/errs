@@ -103,10 +103,15 @@ func initPerf(t *testing.T, srv *perfServer) {
 func TestRecordRequestBatches(t *testing.T) {
 	is := is.New(t)
 	srv := newPerfServer(t)
-	initPerf(t, srv)
+	at := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	resetActive(t)
+	is.NoErr(Init(Options{
+		DSN:        testSockeyeDSN,
+		HTTPClient: rewriteTransport(srv.URL),
+		Clock:      func() time.Time { return at },
+	}))
 	defer Flush(time.Second)
 
-	at := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
 	for range perfBatchMax {
 		RecordRequest(Request{Route: "/a", Status: 200, Duration: 12 * time.Millisecond, Time: at})
 	}
@@ -565,4 +570,49 @@ func TestPerfExtraKeyMatchesRegexp(t *testing.T) {
 	} {
 		is.Eq(perfExtraKey(k), re.MatchString(k))
 	}
+}
+
+// TestRecordRequestDropsBadTimeIndividually verifies that a stale Time
+// (past perfMaxAge), a year past 9999, and a negative year are each
+// dropped individually without failing normal records in the batch or
+// incrementing the perf circuit breaker.
+func TestRecordRequestDropsBadTimeIndividually(t *testing.T) {
+	is := is.New(t)
+	resetActive(t)
+	srv := newPerfServer(t)
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	is.NoErr(Init(Options{
+		DSN:        testSockeyeDSN,
+		HTTPClient: rewriteTransport(srv.URL),
+		Clock:      func() time.Time { return now },
+	}))
+	c := active.Load()
+
+	RecordRequest(Request{Route: "/stale", Status: 200, Time: now.Add(-2 * time.Hour)})
+	RecordRequest(Request{Route: "/year-10000", Status: 200, Time: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)})
+	RecordRequest(Request{Route: "/year-neg", Status: 200, Time: time.Date(-1, 1, 1, 0, 0, 0, 0, time.UTC)})
+	RecordRequest(Request{Route: "/ok-1", Status: 200, Time: now.Add(-5 * time.Minute)})
+	RecordRequest(Request{Route: "/ok-2", Status: 200})
+	Flush(time.Second)
+
+	posts := srv.received()
+	var recs []map[string]any
+	var droppedHeader string
+	for _, p := range posts {
+		recs = append(recs, p.records...)
+		if p.dropped != "" {
+			droppedHeader = p.dropped
+		}
+	}
+	is.Eq(len(recs), 2)
+	is.Eq(recs[0]["route"], "/ok-1")
+	is.Eq(recs[1]["route"], "/ok-2")
+	is.Eq(DroppedRequests(), int64(3))
+	is.Eq(droppedHeader, "3")
+
+	ps := c.perf.Load()
+	ps.breakerMu.Lock()
+	failures := ps.failures
+	ps.breakerMu.Unlock()
+	is.Eq(failures, 0)
 }

@@ -41,7 +41,9 @@ type Request struct {
 	// queries, only pool waits, or both at once. The rest is time in
 	// which neither ran. nil sends no split, and sockeye shows none.
 	Elapsed *DBElapsed
-	// Time is when the request happened. Zero means now.
+	// Time is when the request happened. Zero means now. RecordRequest
+	// drops a record whose Time is older than 55 minutes or whose year
+	// is outside 0..9999 so one record does not fail its batch.
 	Time time.Time
 	// User is the service's id for the signed-in user. sockeye counts
 	// the user's requests for each route and day, and stores no other
@@ -295,17 +297,39 @@ func (c *client) perfSender() *perfSender {
 	return c.perf.Load()
 }
 
+// validPerfTime reports whether at encodes as RFC 3339 (years 0..9999)
+// and is within perfMaxAge of now so sockeye does not refuse the whole
+// batch for one stale or out-of-range record.
+func validPerfTime(at, now time.Time) bool {
+	y := at.Year()
+	if y < 0 || y > 9999 {
+		return false
+	}
+	return now.Sub(at) <= perfMaxAge
+}
+
 func (s *perfSender) add(r Request) {
+	now := s.c.now()
 	at := r.Time
 	if at.IsZero() {
-		at = s.c.now()
+		at = now
+	}
+	at = at.UTC()
+	if !validPerfTime(at, now) {
+		s.mu.Lock()
+		closed := s.closed
+		s.mu.Unlock()
+		if !closed {
+			s.drop(1)
+		}
+		return
 	}
 	rec := perfRecord{
 		Route:      perfRoute(r.Route),
 		Pattern:    perfCut(r.Pattern, perfPatternMax),
 		Status:     r.Status,
 		DurationMs: ms(r.Duration),
-		Time:       at.UTC(),
+		Time:       at,
 		User:       perfUser(r.User),
 		Method:     perfMethod(r.Method),
 		Extra:      perfExtra(r.Extra),
