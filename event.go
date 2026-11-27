@@ -235,15 +235,28 @@ func noteValue(s string) jsontext.Value {
 	return b
 }
 
+const panickedErrorText = "error panicked in Error()"
+
+func safeErrorText(err error) (text string, ok bool) {
+	defer func() {
+		if recover() != nil {
+			text = panickedErrorText
+			ok = false
+		}
+	}()
+	return err.Error(), true
+}
+
 // exceptionFromError builds an exception payload for err.
 func exceptionFromError(err error, fallbackPCs []uintptr, root, inAppPrefix string) *exceptionPayload {
 	pcs := stackFromError(err)
 	if pcs == nil {
 		pcs = fallbackPCs
 	}
+	text, _ := safeErrorText(err)
 	val := exceptionValue{
 		Type:  errorTypeName(err),
-		Value: truncate(err.Error()),
+		Value: truncate(text),
 	}
 	if frames := resolveFrames(pcs, root, inAppPrefix); len(frames) > 0 {
 		val.Stacktrace = &stacktrace{Frames: frames}
@@ -262,8 +275,10 @@ func errorTypeName(err error) string {
 		return "error"
 	}
 	if t == plainErrorType {
-		if title := titleFromMessage(err.Error()); title != "" {
-			return title
+		if text, ok := safeErrorText(err); ok {
+			if title := titleFromMessage(text); title != "" {
+				return title
+			}
 		}
 	}
 	return t.String()
@@ -295,9 +310,9 @@ func baseErrorType(err error) reflect.Type {
 		}
 		switch u := e.(type) {
 		case interface{ Unwrap() error }:
-			e = u.Unwrap()
+			e = safeUnwrapSingle(u)
 		case interface{ Unwrap() []error }:
-			for _, c := range u.Unwrap() {
+			for _, c := range safeUnwrapMulti(u) {
 				if t := baseErrorType(c); t != nil {
 					return t
 				}

@@ -66,17 +66,18 @@ func callers(skip int) []uintptr {
 }
 
 // stackFromError walks the error chain to find a stack trace.
-// It inspects errors from Unwrap and Unwrap() []error.
+// It inspects errors from Unwrap and Unwrap() []error and recovers
+// panics from host StackTrace or Unwrap methods.
 func stackFromError(err error) []uintptr {
 	for e := err; e != nil; {
 		if s, ok := e.(stackCarrier); ok {
-			return s.StackTrace()
+			return safeStackTrace(s)
 		}
 		switch u := e.(type) {
 		case interface{ Unwrap() error }:
-			e = u.Unwrap()
+			e = safeUnwrapSingle(u)
 		case interface{ Unwrap() []error }:
-			for _, c := range u.Unwrap() {
+			for _, c := range safeUnwrapMulti(u) {
 				if pcs := stackFromError(c); pcs != nil {
 					return pcs
 				}
@@ -87,4 +88,31 @@ func stackFromError(err error) []uintptr {
 		}
 	}
 	return nil
+}
+
+func safeStackTrace(s stackCarrier) (pcs []uintptr) {
+	defer func() {
+		if recover() != nil {
+			pcs = nil
+		}
+	}()
+	return s.StackTrace()
+}
+
+func safeUnwrapSingle(u interface{ Unwrap() error }) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = nil
+		}
+	}()
+	return u.Unwrap()
+}
+
+func safeUnwrapMulti(u interface{ Unwrap() []error }) (errs []error) {
+	defer func() {
+		if recover() != nil {
+			errs = nil
+		}
+	}()
+	return u.Unwrap()
 }

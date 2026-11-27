@@ -548,3 +548,71 @@ func BenchmarkCut(b *testing.B) {
 		}
 	})
 }
+
+type typedNilErr struct{ msg string }
+
+func (e *typedNilErr) Error() string { return e.msg }
+
+type customWrapErr struct{ err error }
+
+func (e customWrapErr) Error() string { return "wrap: " + e.err.Error() }
+func (e customWrapErr) Unwrap() error { return e.err }
+
+type panicUnwrapErr struct{}
+
+func (panicUnwrapErr) Error() string { return "unwrap-ok" }
+func (panicUnwrapErr) Unwrap() error { panic("unwrap boom") }
+
+type panicUnwrapMultiErr struct{}
+
+func (panicUnwrapMultiErr) Error() string   { return "unwrap-multi-ok" }
+func (panicUnwrapMultiErr) Unwrap() []error { panic("unwrap multi boom") }
+
+type panicStackErr struct{}
+
+func (panicStackErr) Error() string         { return "stack-ok" }
+func (panicStackErr) StackTrace() []uintptr { panic("stack boom") }
+
+// TestCaptureExceptionRecoversHostErrorPanics verifies that a panicking
+// Error, Unwrap, or StackTrace method on a reported error (top-level,
+// below fmt.Errorf("%w"), or inside errors.Join) never escapes
+// CaptureException and still sends an event with a fixed placeholder.
+func TestCaptureExceptionRecoversHostErrorPanics(t *testing.T) {
+	cases := []struct {
+		name      string
+		err       error
+		wantValue string
+	}{
+		{"typed-nil", (*typedNilErr)(nil), panickedErrorText},
+		{"panic-error", (*panickingError)(nil), panickedErrorText},
+		{"panic-unwrap", panicUnwrapErr{}, "unwrap-ok"},
+		{"panic-unwrap-multi", panicUnwrapMultiErr{}, "unwrap-multi-ok"},
+		{"panic-stack", panicStackErr{}, "stack-ok"},
+		{"wrapped-typed-nil", fmt.Errorf("wrap: %w", (*typedNilErr)(nil)), "wrap: <nil>"},
+		{"custom-wrapped-typed-nil", customWrapErr{err: (*typedNilErr)(nil)}, panickedErrorText},
+		{"wrapped-panic-unwrap", fmt.Errorf("wrap: %w", panicUnwrapErr{}), "wrap: unwrap-ok"},
+		{"wrapped-panic-stack", fmt.Errorf("wrap: %w", panicStackErr{}), "wrap: stack-ok"},
+		{"joined-typed-nil", errors.Join(errors.New("ok"), (*typedNilErr)(nil)), panickedErrorText},
+		{"joined-panic-unwrap", errors.Join(panicUnwrapErr{}, errors.New("ok")), "unwrap-ok\nok"},
+		{"joined-panic-stack", errors.Join(panicStackErr{}, errors.New("ok")), "stack-ok\nok"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			is := is.New(t)
+			resetActive(t)
+			srv := newSockeyeServer(t)
+			defer srv.Close()
+			is.NoErr(Init(Options{DSN: testDSN, HTTPClient: rewriteTransport(srv.URL)}))
+			defer Flush(time.Second)
+
+			id := CaptureException(tc.err)
+			is.True(id != "")
+			Flush(time.Second)
+
+			ev := srv.firstEvent(t)
+			exc := ev["exception"].(map[string]any)
+			val := exc["values"].([]any)[0].(map[string]any)
+			is.Eq(val["value"], tc.wantValue)
+		})
+	}
+}
