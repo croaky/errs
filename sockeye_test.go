@@ -6,8 +6,6 @@ import (
 	"errors"
 	"hash/maphash"
 	"io"
-	"log/slog"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -315,7 +313,7 @@ func TestSockeyeBreakerOpensAndReportsDropped(t *testing.T) {
 	last := reqs[len(reqs)-1]
 	is.Eq(len(reqs), tries+1)
 	extra := last.ev["extra"].(map[string]any)
-	is.Eq(extra["dropped"], float64(breakerFailures+1))
+	is.Eq(extra["dropped"], strconv.Itoa(breakerFailures+1))
 
 	sendNow(c, "after")
 	reqs = srv.requests()
@@ -455,10 +453,7 @@ func TestAsyncFlushSendsHeldCounts(t *testing.T) {
 
 // TestSockeyeEventSurvivesBadValues: an event with invalid UTF-8 in its
 // message, a tag, and an extra value still reaches sockeye, with U+FFFD
-// in place of each bad byte. A time.Duration goes as integer
-// nanoseconds, as encoding/json v1 sent it. An error goes as Error(),
-// a non-finite float goes as its text, and the rest of extra stays as
-// it is.
+// in place of each bad byte.
 func TestSockeyeEventSurvivesBadValues(t *testing.T) {
 	is := is.New(t)
 	resetActive(t)
@@ -470,10 +465,7 @@ func TestSockeyeEventSurvivesBadValues(t *testing.T) {
 	CaptureMessage("bad \xff byte",
 		WithTag("path", "/a\xffb"),
 		WithExtra("output", "x\xfey"),
-		WithExtra("took", 1500*time.Millisecond),
-		WithExtra("cause", errors.New("boom")),
-		WithExtra("ratio", math.NaN()),
-		WithExtra("page", 2),
+		WithExtra("page", "2"),
 	)
 	Flush(time.Second)
 
@@ -482,10 +474,7 @@ func TestSockeyeEventSurvivesBadValues(t *testing.T) {
 	is.Eq(ev["tags"].(map[string]any)["path"], "/a\uFFFDb")
 	extra := ev["extra"].(map[string]any)
 	is.Eq(extra["output"], "x\uFFFDy")
-	is.Eq(extra["took"], 1.5e9)
-	is.Eq(extra["cause"], "boom")
-	is.Eq(extra["ratio"], "NaN")
-	is.Eq(extra["page"], 2.0)
+	is.Eq(extra["page"], "2")
 }
 
 // TestFlushCountsForgetsQuietErrors: after many errors with distinct
@@ -524,11 +513,10 @@ var keyCollisions = [][2]string{
 	{strings.Repeat("a", 63) + "\xff", strings.Repeat("a", 63) + "\xfe"},
 }
 
-// TestEventKeysAreCanonical: tag keys, extra keys, and slog attribute
-// keys that differ only in invalid UTF-8 do not drop the event. The
-// event arrives with one key, and the last one in option order wins.
-// The same holds for a held count event, and the dropped counter does
-// not change.
+// TestEventKeysAreCanonical: tag keys and extra keys that differ only
+// in invalid UTF-8 do not drop the event. The event arrives with one
+// key, and the last one in option order wins. The same holds for a
+// held count event, and the dropped counter does not change.
 func TestEventKeysAreCanonical(t *testing.T) {
 	captures := []struct {
 		name  string
@@ -540,9 +528,6 @@ func TestEventKeysAreCanonical(t *testing.T) {
 		}},
 		{"WithExtra", "extra", func(a, b string) {
 			CaptureMessage("keys", WithExtra(a, "first"), WithExtra(b, "second"))
-		}},
-		{"SlogHandler", "extra", func(a, b string) {
-			slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil))).Error("keys", a, "first", b, "second")
 		}},
 	}
 	for _, cp := range captures {
@@ -636,7 +621,7 @@ func (w *countWriter) Write(b []byte) (int, error) {
 	}
 	w.total += max(e.Count, 1)
 	if d, ok := e.Extra["dropped"]; ok {
-		n, err := strconv.Atoi(string(d))
+		n, err := strconv.Atoi(d)
 		if err != nil {
 			w.t.Fatal(err)
 		}
@@ -741,8 +726,8 @@ func TestBucketOverflowSamplesLikeAnyBucket(t *testing.T) {
 
 // TestOneCallSiteProducesOneSamplingBucket: caller-controlled message or
 // plain-error text from one call site maps to one sampling bucket for
-// CaptureException, CaptureMessage, and SlogHandler. Two distinct call
-// sites map to distinct buckets.
+// CaptureException and CaptureMessage. Two distinct call sites map to
+// distinct buckets.
 func TestOneCallSiteProducesOneSamplingBucket(t *testing.T) {
 	cases := []struct {
 		name string
@@ -753,9 +738,6 @@ func TestOneCallSiteProducesOneSamplingBucket(t *testing.T) {
 		}},
 		{"CaptureMessage", func(slug string) {
 			CaptureMessage("request rejected for " + slug)
-		}},
-		{"SlogHandler", func(slug string) {
-			slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil))).Error("request rejected for " + slug)
 		}},
 	}
 	for _, tc := range cases {
@@ -798,7 +780,7 @@ func TestOneCallSiteProducesOneSamplingBucket(t *testing.T) {
 // TestDefaultPrefixSamplingKeysOnFramesAlone verifies that without an
 // InAppPrefix override (including when no frame is marked in_app),
 // varying non-digit text from one call site still maps to one bucket
-// across CaptureException, CaptureMessage, and SlogHandler.
+// across CaptureException and CaptureMessage.
 func TestDefaultPrefixSamplingKeysOnFramesAlone(t *testing.T) {
 	cases := []struct {
 		name string
@@ -809,9 +791,6 @@ func TestDefaultPrefixSamplingKeysOnFramesAlone(t *testing.T) {
 		}},
 		{"CaptureMessage", func(slug string) {
 			CaptureMessage("request rejected for " + slug)
-		}},
-		{"SlogHandler", func(slug string) {
-			slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil))).Error("request rejected for " + slug)
 		}},
 	}
 	for _, tc := range cases {
@@ -949,7 +928,7 @@ func sendNow(c *client, msg string, opts ...Option) {
 func benchEvent(b *testing.B) *event {
 	b.Helper()
 	c := &client{environment: "production", release: "4387d81", serverName: "web-1"}
-	e := c.newEvent("error", []Option{WithTag("job", "worker.RefreshItem"), WithRequestID("01J9ZQ4N8V2K7"), WithExtra("company_id", 42)})
+	e := c.newEvent("error", []Option{WithTag("job", "worker.RefreshItem"), WithRequestID("01J9ZQ4N8V2K7"), WithExtra("company_id", "42")})
 	e.Exception = exceptionFromError(deepErr(16), nil, "/Users/dev/src/github.com/croaky/errs", "github.com/croaky/errs")
 	return e
 }

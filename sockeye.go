@@ -205,9 +205,9 @@ func (c *client) post(e *event, count int) {
 	if dropped > 0 {
 		e.Extra = maps.Clone(e.Extra)
 		if e.Extra == nil {
-			e.Extra = map[string]jsontext.Value{}
+			e.Extra = map[string]string{}
 		}
-		e.Extra["dropped"] = jsontext.Value(strconv.FormatInt(dropped, 10))
+		e.Extra["dropped"] = strconv.FormatInt(dropped, 10)
 	}
 	body, err := json.Marshal(e, wireJSON)
 	if err != nil {
@@ -388,7 +388,7 @@ var errsPkg = reflect.TypeFor[client]().PkgPath()
 
 // isReportingFrame reports whether fn belongs to errs, log, or
 // log/slog. The fingerprintKey fallback skips these frames so
-// SlogHandler and log calls key on the caller, not the SDK.
+// reporting helpers key on the caller, not the SDK.
 func isReportingFrame(fn string) bool {
 	return hasPkgPrefix(fn, errsPkg) || hasPkgPrefix(fn, "log") || hasPkgPrefix(fn, "log/slog")
 }

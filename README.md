@@ -29,30 +29,6 @@ if err != nil {
 defer errs.Flush(2 * time.Second)
 ```
 
-Wrap an explicit slog handler (such as `slog.NewTextHandler` or
-`slog.NewJSONHandler`) to report every `slog.Error` call. The call still
-writes its log line:
-
-```go
-h := slog.NewTextHandler(os.Stderr, nil)
-slog.SetDefault(slog.New(errs.SlogHandler(h)))
-```
-
-If you pass Go's built-in default handler from `slog.Default().Handler()`
-to `SlogHandler`, `SlogHandler` replaces it with a text handler on
-`log.Writer()` so `slog.SetDefault` does not deadlock `log`.
-
-The handler sends the record attributes as extras. It resolves each
-`slog.LogValuer` first and encodes non-scalar values as JSON, matching
-`slog.JSONHandler`. Event extras honor `LogValuer`, `MarshalJSON`,
-`MarshalJSONTo`, `MarshalText`, `AppendText`, `json` tags, and field
-visibility, including on error values. Plain errors without a marshal
-method use `Error()`. An `"err"` attribute that resolves to an error
-becomes an exception that always uses `Error()`, so only
-`slog.LogValuer` redacts on that path. Events ignore `fmt.Stringer` and
-`fmt.Formatter`, follow reachable exported pointers, and do not honor
-the wrapped handler's `ReplaceAttr`.
-
 An empty `Release` reads the commit from the Go build info.
 
 Wrap errors to record caller stack traces:
@@ -127,14 +103,14 @@ The sockeye path protects both ends of the connection:
   that reaches sockeye carries the number as `extra.dropped`.
 - Each event has a size limit. An event keeps its first 50 tags and
   50 extras, and its first 10 fingerprint parts. The client cuts a
-  key past 64 encoded JSON bytes, a tag value past 1 KiB, a fingerprint
-  part past 256 bytes, and a message or error text past 8 KiB. An extra
-  whose JSON is past 2 KiB becomes a note that gives its size.
+  key past 64 encoded JSON bytes, a tag value past 1 KiB, an extra
+  value past 2 KiB, a fingerprint part past 256 bytes, and a message
+  or error text past 8 KiB.
 - The client replaces each run of invalid UTF-8 in a tag or extra key
   with U+FFFD. Keys that then match are one key, and the last one in
   option order wins.
-- The capture call encodes each extra before it returns, so the caller
-  can change a map or a slice after it passes it to `WithExtra`.
+- The capture call copies each string it keeps, so a short substring
+  does not keep a larger string in memory.
 - The client does not follow HTTP redirects. `Init` copies
   `Options.HTTPClient` and ignores any caller `CheckRedirect`, because a
   redirect can send the DSN key to another host. A `3xx` response counts
@@ -249,11 +225,7 @@ The request path protects both ends of the connection too:
 
 - The client posts each event as JSON to sockeye with a Bearer key.
 - An encode does not drop an event. A string with invalid UTF-8 goes
-  with U+FFFD in place of each bad byte. A `time.Duration` in extra
-  goes as integer nanoseconds. An `error` extra without a JSON or text
-  marshal method goes as `Error()`, and a non-finite float goes as its
-  text. Any other extra value that JSON cannot encode becomes a fixed
-  note.
+  with U+FFFD in place of each bad byte.
 - An asynchronous worker queues events up to 1,000 items and drops
   events when the queue is full.
 - The sender retries transport errors and transient HTTP status codes
@@ -261,8 +233,7 @@ The request path protects both ends of the connection too:
 - The sender obeys the `Retry-After` HTTP header, up to 10 seconds. A
   longer pause comes from the circuit breaker.
 - The client writes its own failure lines to stderr, not through the
-  global `log` logger. A host that bridges `log` into `SlogHandler`
-  does not turn a failed send into a new event.
+  global `log` logger.
 - Frames matching the application module path are marked as `in_app`.
 
 ## Explicit journal sink
@@ -288,8 +259,7 @@ close a writer owned by the caller. A successful Write proves only that
 the writer accepted bytes, not journal persistence or server acceptance.
 Process death can lose buffered events, and journal loss is unknown time.
 
-Self-redacting slog values still resolve at capture time. This is not a
-general secret scanner: do not put secrets in event text or metadata.
+Do not put secrets in event text or metadata.
 The SDK installs no panic hook. A caller that logs a recovered panic must
 re-panic when continuing would leave the process unsafe.
 

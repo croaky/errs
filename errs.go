@@ -3,7 +3,6 @@ package errs
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json/jsontext"
 	"fmt"
 	"hash/maphash"
 	"io"
@@ -30,9 +29,7 @@ const (
 	maxRetryAfter = 10 * time.Second
 )
 
-// logger writes the client's own diagnostics to stderr. It is not the
-// global log logger, because a host can bridge that logger into
-// SlogHandler, and a failed send would then become a new event.
+// logger writes the client's own diagnostics to stderr.
 var logger = log.New(os.Stderr, "", log.LstdFlags)
 
 var defaultRetryDelays = []time.Duration{
@@ -100,21 +97,19 @@ func WithTag(key, value string) Option {
 	}
 }
 
-// WithExtra attaches structured metadata to the event. The capture
-// call encodes value as JSON before it returns, so the caller can
-// change value afterward. An event keeps its first maxExtras extras.
-// A key follows the rules of WithTag.
-// See encodeExtra for a value that is too large or does not encode.
-func WithExtra(key string, value any) Option {
+// WithExtra attaches string metadata to the event. An event keeps its
+// first maxExtras extras. The client cuts a key past maxKeyBytes and a
+// value past maxExtraBytes. A key follows the rules of WithTag.
+func WithExtra(key, value string) Option {
 	return func(e *event) {
 		k := eventKey(key)
 		if _, ok := e.Extra[k]; !ok && len(e.Extra) >= maxExtras {
 			return
 		}
 		if e.Extra == nil {
-			e.Extra = map[string]jsontext.Value{}
+			e.Extra = map[string]string{}
 		}
-		e.Extra[k] = encodeExtra(value)
+		e.Extra[k] = cut(value, maxExtraBytes)
 	}
 }
 

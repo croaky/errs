@@ -5,7 +5,6 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -65,18 +64,6 @@ func TestJournalSinkShortWriteDoesNotRetry(t *testing.T) {
 	Flush(time.Second)
 	is.Eq(w.calls, 1)
 	is.Eq(active.Load().dropped.Load(), int64(1))
-	is.NoErr(Init(Options{}))
-}
-
-func TestJournalSinkRedaction(t *testing.T) {
-	is := is.New(t)
-	var out bytes.Buffer
-	is.NoErr(Init(Options{Journal: &out}))
-	logger := slog.New(SlogHandler(slog.NewTextHandler(io.Discard, nil)))
-	logger.Error("fixture", "token", secret("fixture-secret"))
-	Flush(time.Second)
-	is.Eq(strings.Contains(out.String(), "fixture-secret"), false)
-	is.Eq(strings.Contains(out.String(), "REDACTED"), true)
 	is.NoErr(Init(Options{}))
 }
 

@@ -1,15 +1,9 @@
 package errs
 
 import (
-	"encoding"
-	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"errors"
-	"fmt"
-	"math"
 	"reflect"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -20,21 +14,21 @@ var stackErrType = reflect.TypeFor[*stackErr]()
 
 // event represents an error or message event payload.
 type event struct {
-	EventID     string                    `json:"event_id"`
-	Timestamp   string                    `json:"timestamp"`
-	Platform    string                    `json:"platform"`
-	Level       string                    `json:"level"`
-	Environment string                    `json:"environment,omitempty"`
-	Release     string                    `json:"release,omitempty"`
-	ServerName  string                    `json:"server_name,omitempty"`
-	SDK         sdkInfo                   `json:"sdk"`
-	Tags        map[string]string         `json:"tags,omitempty"`
-	Extra       map[string]jsontext.Value `json:"extra,omitempty"`
-	Fingerprint []string                  `json:"fingerprint,omitempty"`
-	Message     string                    `json:"message,omitempty"`
-	Count       int                       `json:"count,omitzero"`
-	Stacktrace  *stacktrace               `json:"stacktrace,omitempty"`
-	Exception   *exceptionPayload         `json:"exception,omitempty"`
+	EventID     string            `json:"event_id"`
+	Timestamp   string            `json:"timestamp"`
+	Platform    string            `json:"platform"`
+	Level       string            `json:"level"`
+	Environment string            `json:"environment,omitempty"`
+	Release     string            `json:"release,omitempty"`
+	ServerName  string            `json:"server_name,omitempty"`
+	SDK         sdkInfo           `json:"sdk"`
+	Tags        map[string]string `json:"tags,omitempty"`
+	Extra       map[string]string `json:"extra,omitempty"`
+	Fingerprint []string          `json:"fingerprint,omitempty"`
+	Message     string            `json:"message,omitempty"`
+	Count       int               `json:"count,omitzero"`
+	Stacktrace  *stacktrace       `json:"stacktrace,omitempty"`
+	Exception   *exceptionPayload `json:"exception,omitempty"`
 }
 
 // The limits on the caller text in one event. With the message and
@@ -154,85 +148,6 @@ func eventKey(s string) string {
 		return k
 	}
 	return cut(strings.ToValidUTF8(k, "\uFFFD"), maxKeyBytes)
-}
-
-var (
-	jsonMarshalerType   = reflect.TypeFor[json.Marshaler]()
-	jsonMarshalerToType = reflect.TypeFor[json.MarshalerTo]()
-	textMarshalerType   = reflect.TypeFor[encoding.TextMarshaler]()
-	textAppenderType    = reflect.TypeFor[encoding.TextAppender]()
-)
-
-// hasCustomMarshaler reports whether encoding/json/v2 invokes a JSON or
-// text marshal method for v, including a pointer-receiver method on a
-// non-pointer value.
-func hasCustomMarshaler(v any) bool {
-	switch v.(type) {
-	case json.Marshaler, json.MarshalerTo, encoding.TextMarshaler, encoding.TextAppender:
-		return true
-	}
-	t := reflect.TypeOf(v)
-	if t == nil || t.Kind() == reflect.Pointer {
-		return false
-	}
-	pt := reflect.PointerTo(t)
-	return pt.Implements(jsonMarshalerType) ||
-		pt.Implements(jsonMarshalerToType) ||
-		pt.Implements(textMarshalerType) ||
-		pt.Implements(textAppenderType)
-}
-
-// encodeExtra encodes one extra value as JSON on the caller goroutine,
-// so the worker reads no memory the caller can still change. An error
-// without a JSON or text marshal method goes as Error(), and a
-// non-finite float goes as its text. Any other value that JSON cannot
-// encode, or whose marshal method panics, goes as a fixed note so
-// hidden fields never fall back to Error() or fmt text. A value whose
-// encoding is past maxExtraBytes goes as a size note.
-func encodeExtra(v any) (out jsontext.Value) {
-	defer func() {
-		if r := recover(); r != nil {
-			out = noteValue("extra value panicked while it encoded")
-		}
-	}()
-	var (
-		b   []byte
-		err error
-	)
-	switch x := v.(type) {
-	case error:
-		if hasCustomMarshaler(v) {
-			b, err = json.Marshal(v, wireJSON)
-		} else {
-			b, err = json.Marshal(x.Error(), wireJSON)
-		}
-	case float64:
-		if math.IsNaN(x) || math.IsInf(x, 0) {
-			b, err = json.Marshal(strconv.FormatFloat(x, 'g', -1, 64), wireJSON)
-		} else {
-			b, err = json.Marshal(x, wireJSON)
-		}
-	case float32:
-		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
-			b, err = json.Marshal(strconv.FormatFloat(float64(x), 'g', -1, 32), wireJSON)
-		} else {
-			b, err = json.Marshal(x, wireJSON)
-		}
-	default:
-		b, err = json.Marshal(v, wireJSON)
-	}
-	if err != nil {
-		return noteValue("extra value could not encode")
-	}
-	if len(b) > maxExtraBytes {
-		return noteValue(fmt.Sprintf("extra was %d bytes; the limit is %d", len(b), maxExtraBytes))
-	}
-	return b
-}
-
-func noteValue(s string) jsontext.Value {
-	b, _ := json.Marshal(s)
-	return b
 }
 
 const panickedErrorText = "error panicked in Error()"

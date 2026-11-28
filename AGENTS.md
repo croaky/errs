@@ -49,7 +49,6 @@ assertions from `github.com/croaky/is`.
   circuit breaker.
 - `stack.go` — `Wrap`, `Errorf`, `PanicError`, stack program counter
   capture, and error chain walking.
-- `slog.go` — `SlogHandler`, which reports error-level slog records.
 - `perf.go` — `RecordRequest` and `DroppedRequests`, the request-record
   sender for sockeye's perf page.
 - `doc.go` — package documentation.
@@ -146,10 +145,8 @@ bounds the wire value, not the memory or time spent encoding it. Treat
 custom marshal and formatting methods as host code on the caller path.
 Test a limit, an input past it, and a valid value that must remain.
 
-Redaction has more than one path. Resolve LogValuer before capture and
-test nested groups. The wrapped handler's ReplaceAttr does not apply
-to events. Never claim that it does. Diagnostic errors must not repeat
-a DSN or another credential. Build endpoints from parsed URL fields.
+Diagnostic errors must not repeat a DSN or another credential. Build
+endpoints from parsed URL fields.
 
 Measure normal, sampled-out, and oversized capture separately. Compare
 time, bytes, and allocations with repeated runs on one toolchain. Keep
