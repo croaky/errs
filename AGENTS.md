@@ -54,6 +54,42 @@ assertions from `github.com/croaky/is`.
   sender for sockeye's perf page.
 - `doc.go` — package documentation.
 
+## Runtime dependencies
+
+Use Go by default for repository programs and helpers. Keep shell glue
+to Bash and standard Unix tools. Lua is allowed for Neovim configuration.
+Dan may use Lua with Rex later; that is not approval to adopt Rex or
+expand Lua into other tools. Write new owned tools and scripts in Go.
+Do not add Python or a Node-family runtime, including
+Node.js, npm, npx, Bun, or Deno. Ask Dan before adding another language
+or runtime outside this stack.
+
+Prefer the Go standard library and code Dan owns. His own Neovim Lua
+scripts and modules do not approve third-party Lua packages.
+`require` loads a module and does not download it. Do not add LuaRocks
+packages, Neovim plugins, or other third-party packages in any language
+without Dan's approval. Keep existing approved dependencies unless a
+separate change authorizes their removal.
+
+This rule covers app code, build tools, tests, fixtures that execute,
+CI, deploys, ops, backups, recovery, and one-time migration scripts.
+Inline commands, heredocs, and remote SSH commands have the same rule.
+A helper outside the repo must not hide a required runtime.
+
+Check a tool's runtime requirements before adding it. A tool that needs
+Python or Node still adds that dependency when another package installs
+it. A native executable does not require its implementation language's
+compiler or runtime merely because it was built in Rust, Zig, or C.
+Do not add those toolchains without Dan's approval.
+
+Browser JavaScript and TypeScript are distinct from a host JS runtime.
+Use the existing native Go build tools, not npm or a new JS runtime.
+Source text used only as parser input is not an executable dependency.
+
+Report existing violations. Their presence does not approve new uses.
+Do not replace deployed helpers or remove packages without an approved
+change. Explain any proposed exception and wait for Dan's decision.
+
 ## Checks
 
 Pin every tool a check runs. `tools.mod` and `tools.sum` hold the
